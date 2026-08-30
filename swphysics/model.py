@@ -7,6 +7,11 @@ GridPoint = Tuple[int, int, int]
 Matrix3 = Tuple[int, int, int, int, int, int, int, int, int]
 
 IDENTITY_MATRIX: Matrix3 = (1, 0, 0, 0, 1, 0, 0, 0, 1)
+# ``c_scene_vehicle_component_base::parse_data`` in build 24749959 passes this
+# serialized matrix as the default value for an omitted ``o/@r`` attribute.
+# It is the editor's native component orientation, not the mathematical
+# identity matrix.
+DEFAULT_COMPONENT_ROTATION: Matrix3 = (0, 0, 1, -1, 0, 0, 0, -1, 0)
 _ATOLL_PREFIX_RE = re.compile(r"^[\t\n\v\f\r ]*([+-]?[0-9]+)")
 
 

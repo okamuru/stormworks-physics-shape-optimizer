@@ -9,6 +9,9 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QKeySequence, QMouseEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from swphysics.app_service import analyze_vehicle, save_analyzed_vehicle_copy
@@ -22,6 +25,7 @@ from swphysics.gui import (
 
 ROOT = Path(__file__).resolve().parents[1]
 VEHICLE = ROOT / "tests/fixtures/vehicles/order_b.xml"
+MULTI_BODY_VEHICLE = ROOT / "tests/fixtures/vehicles/multi_body_non_physics.xml"
 DEFINITIONS = ROOT / "tests/fixtures/definitions"
 
 
@@ -109,6 +113,10 @@ class GuiI18nTests(unittest.TestCase):
                     }
                 )
             self.assertEqual(placeholders[0], placeholders[1], key)
+
+    def test_body_palette_stays_distinct_for_a_sixty_body_vehicle(self):
+        colors = tuple(OptimizerWindow._body_color(index) for index in range(60))
+        self.assertEqual(60, len(set(colors)))
 
     def test_live_switch_preserves_result_view_and_busy_progress(self):
         window = self.make_window()
@@ -235,6 +243,11 @@ class GuiI18nTests(unittest.TestCase):
             "Body 0: XML編集または未対応Shapeの1 Component "
             "(3 physics voxel)を含むためBody全体を順序固定・"
             "予測対象外にしました",
+            "Body 1: 予測対象外の2 Componentを探索から除外して"
+            "元スロットへ戻します。表示値は対応範囲のみで、最終F2 "
+            "Shape数には対象外Componentとの相互作用が含まれません",
+            "Body 1: Physics Flooderの面モデルunsupported_surface_metadata_missing"
+            "を予測対象外にし、残りのComponentだけを最適化します",
         )
 
         translated = tuple(translate_runtime_message(message, "en") for message in messages)
@@ -242,6 +255,8 @@ class GuiI18nTests(unittest.TestCase):
         self.assertIn("Applying analyzed Component order", translated[0])
         self.assertIn("Verifying Component order and attributes", translated[1])
         self.assertIn("Locked the complete Body order", translated[2])
+        self.assertIn("original slots", translated[3])
+        self.assertIn("Excluded unsupported Physics Flooder", translated[4])
         for message in translated:
             self.assertNotRegex(message, r"[぀-ヿ㐀-鿿]")
 
@@ -257,6 +272,561 @@ class GuiI18nTests(unittest.TestCase):
         self.assertIsNone(window.last_output)
         self.assertFalse(window.optimize_button.isEnabled())
         self.assertEqual("未解析", window.eligibility.text())
+
+    def test_selected_body_can_be_excluded_and_restored_without_reanalysis(self):
+        window = self.make_window()
+        analysis = analyze_vehicle(VEHICLE, DEFINITIONS, search_mode="standard")
+        window.show_analysis(analysis)
+        window.body_selector.setCurrentIndex(window.body_selector.findData(0))
+        window.optimized_radio.setChecked(True)
+        window.viewer.set_view_angles(19.0, -11.0)
+        camera_before = window.viewer.camera_state()
+
+        self.assertTrue(window.manual_body_exclusion.isEnabled())
+        self.assertEqual("3", window.optimized_shapes.text())
+        window.manual_body_exclusion.setChecked(True)
+        self.application.processEvents()
+
+        self.assertEqual(camera_before, window.viewer.camera_state())
+        self.assertTrue(window.last_analysis.bodies[0].manually_excluded)
+        self.assertEqual(1, window.last_analysis.manually_excluded_body_count)
+        self.assertEqual("4", window.optimized_shapes.text())
+        self.assertIn("手動除外", window.body_selector.currentText())
+        self.assertIn("手動除外", window.preview_caption.text())
+        self.assertIs(
+            analysis.bodies[0].optimization_result,
+            window.last_analysis.bodies[0].optimization_result,
+        )
+
+        window.language_selector.setCurrentIndex(
+            window.language_selector.findData("en")
+        )
+        self.application.processEvents()
+        self.assertTrue(window.manual_body_exclusion.isChecked())
+        self.assertIn("Manually Excluded", window.body_selector.currentText())
+        self.assertEqual(camera_before, window.viewer.camera_state())
+
+        window.manual_body_exclusion.setChecked(False)
+        self.application.processEvents()
+        self.assertFalse(window.last_analysis.bodies[0].manually_excluded)
+        self.assertEqual("3", window.optimized_shapes.text())
+        self.assertEqual(camera_before, window.viewer.camera_state())
+
+        window.body_selector.setCurrentIndex(window.body_selector.findData(-1))
+        self.assertFalse(window.manual_body_exclusion.isEnabled())
+
+    def test_body_scope_switch_keeps_the_all_body_scene_frame(self):
+        window = self.make_window()
+        analysis = analyze_vehicle(
+            MULTI_BODY_VEHICLE,
+            DEFINITIONS,
+            search_mode="standard",
+        )
+        window.show_analysis(analysis)
+        window.viewer.set_view_angles(17.0, -9.0)
+        scene_before = window.viewer.scene_state()
+        camera_before = window.viewer.camera_state()
+
+        for body_index in (0, 1):
+            window.body_selector.setCurrentIndex(
+                window.body_selector.findData(body_index)
+            )
+            self.application.processEvents()
+            self.assertEqual(scene_before, window.viewer.scene_state())
+            self.assertEqual(camera_before, window.viewer.camera_state())
+
+        window.optimized_radio.setChecked(True)
+        self.application.processEvents()
+        self.assertEqual(scene_before, window.viewer.scene_state())
+        self.assertEqual(camera_before, window.viewer.camera_state())
+
+        window.body_selector.setCurrentIndex(window.body_selector.findData(-1))
+        self.application.processEvents()
+        self.assertEqual(scene_before, window.viewer.scene_state())
+        self.assertEqual(camera_before, window.viewer.camera_state())
+
+    def test_body_management_preview_starts_with_ghosting_and_reuses_viewer(self):
+        window = self.make_window()
+        analysis = analyze_vehicle(
+            MULTI_BODY_VEHICLE,
+            DEFINITIONS,
+            search_mode="standard",
+        )
+        window.show_analysis(analysis)
+        viewer_identity = id(window.viewer)
+
+        self.assertTrue(window.shape_mode_button.isChecked())
+        self.assertTrue(window.body_management_panel.isHidden())
+        self.assertTrue(window.ghost_nonselected)
+        self.assertTrue(window.ghost_button.isChecked())
+
+        window.body_mode_button.setChecked(True)
+        self.application.processEvents()
+
+        self.assertEqual(viewer_identity, id(window.viewer))
+        self.assertFalse(window.body_management_panel.isHidden())
+        self.assertTrue(window.body_selector.isHidden())
+        self.assertTrue(window.manual_options_widget.isHidden())
+        self.assertIn("背景クリック", window.preview_caption.text())
+        self.assertNotIn("ダブルクリック", window.preview_caption.text())
+        self.assertEqual(len(analysis.bodies), window.body_tree.topLevelItemCount())
+        groups = window.viewer.viewer.body_groups
+        self.assertEqual(
+            [body.body_index for body in analysis.bodies],
+            [group.body_index for group in groups],
+        )
+        self.assertTrue(all(group.opacity == 1.0 for group in groups))
+
+        window.body_picked_from_preview((0,), Qt.NoModifier)
+        self.application.processEvents()
+        groups = {group.body_index: group for group in window.viewer.viewer.body_groups}
+        self.assertEqual({0}, window.selected_body_ids)
+        self.assertTrue(groups[0].selected)
+        self.assertEqual(1.0, groups[0].opacity)
+        self.assertFalse(groups[1].selected)
+        self.assertEqual(0.25, groups[1].opacity)
+
+        window.ghost_button.setChecked(False)
+        self.application.processEvents()
+        groups = {group.body_index: group for group in window.viewer.viewer.body_groups}
+        self.assertEqual(1.0, groups[1].opacity)
+
+        window.overview_opacity_slider.setValue(60)
+        window.clear_body_selection()
+        self.application.processEvents()
+        self.assertTrue(
+            all(group.opacity == 0.6 for group in window.viewer.viewer.body_groups)
+        )
+
+        window.shape_mode_button.setChecked(True)
+        self.application.processEvents()
+        self.assertFalse(window.viewer.viewer.body_interaction_enabled)
+
+    def test_body_group_visibility_has_mixed_state_and_undo_redo(self):
+        window = self.make_window()
+        analysis = analyze_vehicle(
+            MULTI_BODY_VEHICLE,
+            DEFINITIONS,
+            search_mode="standard",
+        )
+        window.show_analysis(analysis)
+        window.body_mode_button.setChecked(True)
+        window.show()
+        self.application.processEvents()
+
+        window.body_picked_from_preview((0,), Qt.NoModifier)
+        window.set_selected_bodies_visible(False)
+        window.body_picked_from_preview((1,), Qt.ControlModifier)
+        self.application.processEvents()
+
+        self.assertEqual({0, 1}, window.selected_body_ids)
+        self.assertEqual({0}, window.hidden_body_ids)
+        self.assertEqual(
+            {"◐"},
+            {
+                window.body_tree.topLevelItem(row).text(0)
+                for row in range(window.body_tree.topLevelItemCount())
+            },
+        )
+        visible_groups = {
+            group.body_index for group in window.viewer.viewer.body_groups
+        }
+        self.assertEqual({1}, visible_groups)
+
+        first_item = window.body_tree.topLevelItem(0)
+        item_rect = window.body_tree.visualItemRect(first_item)
+        click_position = item_rect.center()
+        click_position.setX(12)
+        QTest.mouseClick(
+            window.body_tree.viewport(),
+            Qt.LeftButton,
+            Qt.NoModifier,
+            click_position,
+        )
+        self.application.processEvents()
+        self.assertEqual({0, 1}, window.selected_body_ids)
+        self.assertEqual(set(), window.hidden_body_ids)
+        self.assertEqual(
+            {"◉"},
+            {
+                window.body_tree.topLevelItem(row).text(0)
+                for row in range(window.body_tree.topLevelItemCount())
+            },
+        )
+
+        window.undo_body_change()
+        self.assertEqual({0}, window.hidden_body_ids)
+        window.redo_body_change()
+        self.assertEqual(set(), window.hidden_body_ids)
+
+    def test_body_group_optimization_and_history_reuse_cached_analysis(self):
+        window = self.make_window()
+        analysis = analyze_vehicle(
+            MULTI_BODY_VEHICLE,
+            DEFINITIONS,
+            search_mode="standard",
+        )
+        window.show_analysis(analysis)
+        window.body_mode_button.setChecked(True)
+        window.select_all_bodies()
+        window.show()
+        self.application.processEvents()
+        original_results = {
+            body.body_index: body.optimization_result for body in analysis.bodies
+        }
+
+        first_item = window.body_tree.topLevelItem(0)
+        item_rect = window.body_tree.visualItemRect(first_item)
+        check_position = item_rect.center()
+        check_position.setX(
+            window.body_tree.header().sectionPosition(3) + 10
+        )
+        QTest.mouseClick(
+            window.body_tree.viewport(),
+            Qt.LeftButton,
+            Qt.NoModifier,
+            check_position,
+        )
+        self.application.processEvents()
+        self.assertEqual({0, 1}, window.selected_body_ids)
+        self.assertEqual(
+            {body.body_index for body in analysis.bodies},
+            {
+                body.body_index
+                for body in window.last_analysis.bodies
+                if body.manually_excluded
+            },
+        )
+        self.assertTrue(
+            all(
+                window.body_tree.topLevelItem(row).checkState(3) == Qt.Unchecked
+                for row in range(window.body_tree.topLevelItemCount())
+            )
+        )
+        self.assertEqual(
+            original_results,
+            {
+                body.body_index: body.optimization_result
+                for body in window.last_analysis.bodies
+            },
+        )
+
+        window.undo_body_change()
+        self.assertFalse(
+            any(body.manually_excluded for body in window.last_analysis.bodies)
+        )
+        window.redo_body_change()
+        self.assertTrue(
+            all(body.manually_excluded for body in window.last_analysis.bodies)
+        )
+
+    def test_body_filter_pick_hover_and_language_switch_preserve_state(self):
+        window = self.make_window()
+        analysis = analyze_vehicle(
+            MULTI_BODY_VEHICLE,
+            DEFINITIONS,
+            search_mode="standard",
+        )
+        window.show_analysis(analysis)
+        window.body_mode_button.setChecked(True)
+        window.viewer.set_view_angles(21.0, -8.0)
+        camera_before = window.viewer.camera_state()
+
+        window.body_picked_from_preview((0,), Qt.NoModifier)
+        window.body_picked_from_preview((1,), Qt.ControlModifier)
+        self.assertEqual({0, 1}, window.selected_body_ids)
+        window.body_filter_selector.setCurrentIndex(
+            window.body_filter_selector.findData("selected")
+        )
+        self.assertEqual(2, window.body_tree.topLevelItemCount())
+
+        window.body_filter_selector.setCurrentIndex(
+            window.body_filter_selector.findData("all")
+        )
+        window.body_sort_selector.setCurrentIndex(
+            window.body_sort_selector.findData("current")
+        )
+        window.toggle_body_sort_direction()
+        self.assertEqual(1, window.body_tree.topLevelItem(0).data(0, Qt.UserRole))
+
+        window.body_hovered_from_preview(1)
+        self.assertEqual(1, window.hovered_body_id)
+        hovered_item = next(
+            window.body_tree.topLevelItem(row)
+            for row in range(window.body_tree.topLevelItemCount())
+            if window.body_tree.topLevelItem(row).data(0, Qt.UserRole) == 1
+        )
+        self.assertTrue(hovered_item.background(0).color().isValid())
+        window._set_hovered_body(0, update_viewer=True)
+        self.assertEqual(0, window.viewer.viewer.hovered_body_index)
+
+        window.shortcut_help_button.setChecked(True)
+        window.language_selector.setCurrentIndex(
+            window.language_selector.findData("en")
+        )
+        self.application.processEvents()
+        self.assertTrue(window.body_mode_button.isChecked())
+        self.assertEqual({0, 1}, window.selected_body_ids)
+        self.assertEqual(camera_before, window.viewer.camera_state())
+        self.assertIn("Controls and Keyboard Shortcuts", window.shortcut_help_button.text())
+        self.assertFalse(window.shortcut_help_content.isHidden())
+
+        window.body_picked_from_preview((), Qt.NoModifier)
+        self.assertEqual(set(), window.selected_body_ids)
+
+    def test_plain_body_click_replaces_selection_on_list_and_preview(self):
+        window = self.make_window()
+        analysis = analyze_vehicle(
+            MULTI_BODY_VEHICLE,
+            DEFINITIONS,
+            search_mode="standard",
+        )
+        window.show_analysis(analysis)
+        window.body_mode_button.setChecked(True)
+        window.show()
+        self.application.processEvents()
+
+        def click_list_body(body_index, modifiers=Qt.NoModifier):
+            item = next(
+                window.body_tree.topLevelItem(row)
+                for row in range(window.body_tree.topLevelItemCount())
+                if window.body_tree.topLevelItem(row).data(0, Qt.UserRole)
+                == body_index
+            )
+            position = window.body_tree.visualItemRect(item).center()
+            position.setX(window.body_tree.header().sectionPosition(1) + 20)
+            QTest.mouseClick(
+                window.body_tree.viewport(),
+                Qt.LeftButton,
+                modifiers,
+                position,
+            )
+            self.application.processEvents()
+
+        click_list_body(0)
+        self.assertEqual({0}, window.selected_body_ids)
+        click_list_body(1)
+        self.assertEqual({1}, window.selected_body_ids)
+        click_list_body(0, Qt.ControlModifier)
+        self.assertEqual({0, 1}, window.selected_body_ids)
+        click_list_body(1)
+        self.assertEqual({1}, window.selected_body_ids)
+        click_list_body(1)
+        self.assertEqual(set(), window.selected_body_ids)
+        click_list_body(0)
+        click_list_body(1, Qt.ShiftModifier)
+        self.assertEqual({0, 1}, window.selected_body_ids)
+
+        window.clear_body_selection()
+        window.body_picked_from_preview((0,), Qt.NoModifier)
+        window.body_picked_from_preview((1,), Qt.NoModifier)
+        self.assertEqual({1}, window.selected_body_ids)
+        window.body_picked_from_preview((0,), Qt.ControlModifier)
+        self.assertEqual({0, 1}, window.selected_body_ids)
+        window.body_picked_from_preview((1,), Qt.NoModifier)
+        self.assertEqual({1}, window.selected_body_ids)
+
+        window.body_picked_from_preview((0, 1), Qt.AltModifier)
+        self.assertEqual({0}, window.selected_body_ids)
+        window.body_picked_from_preview((0, 1), Qt.AltModifier)
+        self.assertEqual({1}, window.selected_body_ids)
+
+    def test_dragging_across_body_list_rows_does_not_extend_selection(self):
+        window = self.make_window()
+        analysis = analyze_vehicle(
+            MULTI_BODY_VEHICLE,
+            DEFINITIONS,
+            search_mode="standard",
+        )
+        window.show_analysis(analysis)
+        window.body_mode_button.setChecked(True)
+        window.show()
+        self.application.processEvents()
+
+        first = window.body_tree.topLevelItem(0)
+        second = window.body_tree.topLevelItem(1)
+        start = window.body_tree.visualItemRect(first).center()
+        start.setX(window.body_tree.header().sectionPosition(1) + 20)
+        end = window.body_tree.visualItemRect(second).center()
+        end.setX(start.x())
+
+        QTest.mousePress(
+            window.body_tree.viewport(),
+            Qt.LeftButton,
+            Qt.NoModifier,
+            start,
+        )
+        QTest.mouseMove(window.body_tree.viewport(), end, delay=20)
+        QTest.mouseRelease(
+            window.body_tree.viewport(),
+            Qt.LeftButton,
+            Qt.NoModifier,
+            end,
+        )
+        self.application.processEvents()
+
+        self.assertEqual({0}, window.selected_body_ids)
+        self.assertEqual(
+            [0],
+            [
+                int(item.data(0, Qt.UserRole))
+                for item in window.body_tree.selectedItems()
+            ],
+        )
+
+    def test_body_blank_hover_hidden_ghost_and_shortcuts_are_consistent(self):
+        window = self.make_window()
+        analysis = analyze_vehicle(
+            MULTI_BODY_VEHICLE,
+            DEFINITIONS,
+            search_mode="standard",
+        )
+        window.show_analysis(analysis)
+        window.body_mode_button.setChecked(True)
+        window.show()
+        self.application.processEvents()
+
+        shortcut_sequences = [
+            shortcut.key().toString(QKeySequence.PortableText)
+            for shortcut in window._body_shortcuts
+        ]
+        self.assertEqual(len(shortcut_sequences), len(set(shortcut_sequences)))
+        self.assertIn("Ctrl+Y", shortcut_sequences)
+        self.assertIn("Ctrl+Shift+Z", shortcut_sequences)
+
+        window.body_picked_from_preview((0,), Qt.NoModifier)
+        window.set_selected_bodies_visible(False)
+        self.application.processEvents()
+        visible_groups = window.viewer.viewer.body_groups
+        self.assertEqual([1], [group.body_index for group in visible_groups])
+        self.assertEqual(1.0, visible_groups[0].opacity)
+
+        window.body_picked_from_preview((1,), Qt.ControlModifier)
+        window.body_filter_selector.setCurrentIndex(
+            window.body_filter_selector.findData("visible")
+        )
+        blank = window.body_tree.viewport().rect().center()
+        blank.setY(window.body_tree.viewport().height() - 4)
+        visible_item = window.body_tree.topLevelItem(0)
+        QTest.mouseMove(
+            window.body_tree.viewport(),
+            window.body_tree.visualItemRect(visible_item).center(),
+        )
+        self.application.processEvents()
+        window._set_hovered_body(1, update_viewer=True)
+        self.assertIsNone(window.body_tree.itemAt(blank))
+        QApplication.sendEvent(
+            window.body_tree.viewport(),
+            QMouseEvent(
+                QEvent.MouseMove,
+                QPointF(blank),
+                QPointF(blank),
+                QPointF(window.body_tree.viewport().mapToGlobal(blank)),
+                Qt.NoButton,
+                Qt.NoButton,
+                Qt.NoModifier,
+            ),
+        )
+        self.application.processEvents()
+        self.assertIsNone(window.hovered_body_id)
+        QTest.mouseClick(
+            window.body_tree.viewport(),
+            Qt.LeftButton,
+            Qt.NoModifier,
+            blank,
+        )
+        self.application.processEvents()
+        self.assertEqual(set(), window.selected_body_ids)
+
+    def test_body_undo_restores_current_row_for_enter_toggle(self):
+        window = self.make_window()
+        analysis = analyze_vehicle(
+            MULTI_BODY_VEHICLE,
+            DEFINITIONS,
+            search_mode="standard",
+        )
+        window.show_analysis(analysis)
+        window.body_mode_button.setChecked(True)
+        window._select_body_from_list_click(0, Qt.NoModifier)
+        window._select_body_from_list_click(1, Qt.NoModifier)
+
+        window.undo_body_change()
+
+        self.assertEqual({0}, window.selected_body_ids)
+        self.assertEqual(
+            0,
+            window.body_tree.currentItem().data(0, Qt.UserRole),
+        )
+        window.toggle_focused_body_selection()
+        self.assertEqual(set(), window.selected_body_ids)
+
+    def test_body_list_selection_enter_focus_and_history_shortcuts(self):
+        window = self.make_window()
+        analysis = analyze_vehicle(
+            MULTI_BODY_VEHICLE,
+            DEFINITIONS,
+            search_mode="standard",
+        )
+        window.show_analysis(analysis)
+        window.body_mode_button.setChecked(True)
+        window.show()
+        self.application.processEvents()
+        full_scene = window.viewer.scene_state()
+
+        first_item = window.body_tree.topLevelItem(0)
+        item_rect = window.body_tree.visualItemRect(first_item)
+        body_position = item_rect.center()
+        body_position.setX(
+            window.body_tree.header().sectionPosition(1) + 20
+        )
+        QTest.mouseClick(
+            window.body_tree.viewport(),
+            Qt.LeftButton,
+            Qt.NoModifier,
+            body_position,
+        )
+        self.application.processEvents()
+        self.assertEqual({0}, window.selected_body_ids)
+
+        window.undo_body_change()
+        self.assertEqual(set(), window.selected_body_ids)
+        window.redo_body_change()
+        self.assertEqual({0}, window.selected_body_ids)
+
+        first_item = window.body_tree.topLevelItem(0)
+        item_rect = window.body_tree.visualItemRect(first_item)
+        body_position = item_rect.center()
+        body_position.setX(
+            window.body_tree.header().sectionPosition(1) + 20
+        )
+        QTest.mouseClick(
+            window.body_tree.viewport(),
+            Qt.LeftButton,
+            Qt.NoModifier,
+            body_position,
+        )
+        self.application.processEvents()
+        self.assertEqual(set(), window.selected_body_ids)
+
+        first_item = window.body_tree.topLevelItem(0)
+        window.body_tree.setCurrentItem(first_item)
+        window.body_tree.clearSelection()
+        window.body_tree.setFocus()
+        QTest.keyClick(window.body_tree, Qt.Key_Return)
+        self.application.processEvents()
+        self.assertEqual({0}, window.selected_body_ids)
+
+        window.viewer.set_view_angles(21.0, -8.0)
+        angles_before_focus = window.viewer.camera_state()[:2]
+        QTest.keyClick(window.body_tree, Qt.Key_F)
+        self.application.processEvents()
+        self.assertEqual(
+            angles_before_focus,
+            window.viewer.camera_state()[:2],
+        )
+        self.assertNotEqual(full_scene, window.viewer.scene_state())
+        window.reset_view()
+        self.assertEqual(full_scene, window.viewer.scene_state())
 
     @staticmethod
     def _search_hint(window, mode):

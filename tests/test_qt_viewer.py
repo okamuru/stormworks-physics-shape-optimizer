@@ -16,7 +16,14 @@ from swphysics.qt_viewer import (
     fast_preview_silhouettes,
     rasterize_fast_preview,
 )
-from swphysics.viewer import SHAPE_COLORS, box_mesh, shade_color
+from swphysics.viewer import (
+    BodyRenderGroup,
+    SHAPE_COLORS,
+    box_mesh,
+    preview_frame,
+    project_point,
+    shade_color,
+)
 
 
 class UnifiedPreviewCoordinateTests(unittest.TestCase):
@@ -24,12 +31,14 @@ class UnifiedPreviewCoordinateTests(unittest.TestCase):
     def setUpClass(cls):
         cls.application = QApplication.instance() or QApplication([])
 
-    def test_shared_viewer_mirrors_vehicle_x_for_software_and_gpu_boundary(self):
+    def test_shared_viewer_rotates_vehicle_around_y_at_renderer_boundary(self):
         viewer = UnifiedPhysicsShapeViewer()
-        viewer.set_shapes((box_mesh(Box((3, 0, 0), (3, 0, 0))),))
+        viewer.set_shapes((box_mesh(Box((3, 0, 5), (3, 0, 5))),))
 
         preview_x = tuple(vertex[0] for vertex in viewer.meshes[0].vertices)
+        preview_z = tuple(vertex[2] for vertex in viewer.meshes[0].vertices)
         self.assertEqual((-3.5, -2.5), (min(preview_x), max(preview_x)))
+        self.assertEqual((-5.5, -4.5), (min(preview_z), max(preview_z)))
         viewer.close()
 
     def test_set_boxes_uses_the_same_preview_conversion(self):
@@ -38,6 +47,80 @@ class UnifiedPreviewCoordinateTests(unittest.TestCase):
 
         preview_x = tuple(vertex[0] for vertex in viewer.meshes[0].vertices)
         self.assertEqual((3.5, 4.5), (min(preview_x), max(preview_x)))
+        viewer.close()
+
+    def test_shared_viewer_preserves_reference_frame_when_scope_changes(self):
+        left = box_mesh(Box((-20, 0, 0), (-20, 0, 0)))
+        right = box_mesh(Box((10, 0, 0), (10, 0, 0)))
+        viewer = UnifiedPhysicsShapeViewer()
+        viewer.resize(640, 480)
+        viewer.set_shapes(
+            (left, right),
+            fit=True,
+            reference_meshes=(left, right),
+        )
+        scene_before = viewer.scene_state()
+        camera_before = viewer.camera_state()
+
+        viewer.set_shapes((left,), fit=False)
+
+        self.assertEqual(scene_before, viewer.scene_state())
+        self.assertEqual(camera_before, viewer.camera_state())
+        self.assertEqual(1, len(viewer.meshes))
+        viewer.close()
+
+    def test_shared_viewer_preserves_body_identity_color_and_opacity(self):
+        viewer = UnifiedPhysicsShapeViewer()
+        viewer.set_body_groups(
+            (
+                BodyRenderGroup(
+                    body_index=7,
+                    meshes=(box_mesh(Box((3, 0, 5), (3, 0, 5))),),
+                    color="#12b76a",
+                    opacity=0.25,
+                    selected=True,
+                ),
+            )
+        )
+
+        group = viewer.viewer.body_groups[0]
+        self.assertEqual(7, group.body_index)
+        self.assertEqual("#12b76a", group.color)
+        self.assertEqual(0.25, group.opacity)
+        self.assertTrue(group.selected)
+        self.assertTrue(viewer.viewer.body_interaction_enabled)
+        self.assertEqual(
+            (-3.5, -2.5),
+            (
+                min(vertex[0] for vertex in group.meshes[0].vertices),
+                max(vertex[0] for vertex in group.meshes[0].vertices),
+            ),
+        )
+        viewer.close()
+
+    def test_body_focus_preserves_angles_while_refitting_selected_body(self):
+        left = box_mesh(Box((-20, 0, 0), (-20, 0, 0)))
+        right = box_mesh(Box((10, 0, 0), (10, 0, 0)))
+        groups = (
+            BodyRenderGroup(0, (left,), "#ff0000", 1.0, True),
+            BodyRenderGroup(1, (right,), "#00ff00", 0.25, False),
+        )
+        viewer = UnifiedPhysicsShapeViewer()
+        viewer.resize(640, 480)
+        viewer.set_body_groups(groups, reference_meshes=(left, right))
+        full_scene = viewer.scene_state()
+        viewer.set_view_angles(21.0, -8.0)
+        angles_before = viewer.camera_state()[:2]
+
+        viewer.set_body_groups(
+            groups,
+            reference_meshes=(left,),
+            preserve_view_angles=True,
+        )
+
+        self.assertEqual(angles_before, viewer.camera_state()[:2])
+        self.assertEqual(1.0, viewer.camera_state()[2])
+        self.assertNotEqual(full_scene, viewer.scene_state())
         viewer.close()
 
 
@@ -131,6 +214,45 @@ class FastPreviewRasterTests(unittest.TestCase):
             shade_color(SHAPE_COLORS[0], 0.72), back.name()
         )
         self.assertEqual(255, back.alpha())
+        viewer.close()
+
+    def test_body_filter_keeps_the_full_scene_center_scale_and_position(self):
+        left = box_mesh(Box((-20, 0, 0), (-20, 0, 0)))
+        right = box_mesh(Box((10, 0, 0), (10, 0, 0)))
+        frame = preview_frame((left, right))
+        viewer = PhysicsShapeViewer()
+        viewer.resize(640, 480)
+        viewer.set_shapes((left, right), frame=frame)
+        viewer.yaw = 0.0
+        viewer.pitch = 0.0
+        scene_before = viewer.scene_state()
+        center_before = viewer.center
+        scale_before = viewer.base_scale
+        position_before = project_point(
+            (-20.0, 0.0, 0.0),
+            viewer.center,
+            viewer.yaw,
+            viewer.pitch,
+            viewer.base_scale,
+            (viewer.width() / 2.0, viewer.height() / 2.0),
+        )
+
+        viewer.set_shapes((left,), fit=False)
+        position_after = project_point(
+            (-20.0, 0.0, 0.0),
+            viewer.center,
+            viewer.yaw,
+            viewer.pitch,
+            viewer.base_scale,
+            (viewer.width() / 2.0, viewer.height() / 2.0),
+        )
+
+        self.assertEqual(scene_before, viewer.scene_state())
+        self.assertEqual(center_before, viewer.center)
+        self.assertEqual(scale_before, viewer.base_scale)
+        self.assertEqual(position_before, position_after)
+        viewer.reset_view()
+        self.assertEqual(scene_before, viewer.scene_state())
         viewer.close()
 
     def test_large_interaction_preview_is_an_opaque_silhouette(self):

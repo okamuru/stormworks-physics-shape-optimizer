@@ -188,6 +188,9 @@ def main() -> int:
     rotated_path = output / "optimized-3-shapes-rotated.png"
     non_cube_path = output / "non-cube-physics-shapes.png"
     all_bodies_path = output / "all-bodies-6-shapes.png"
+    body_management_path = output / "body-management-ghost-selected.png"
+    body_shortcuts_path = output / "body-management-shortcuts.png"
+    body_management_compact_path = output / "body-management-820x660.png"
     overlap_path = output / "overlap-2-shapes-pinned.png"
     english_path = output / "english-ui-820x660.png"
     if not window.grab().save(str(current_path)):
@@ -277,6 +280,78 @@ def main() -> int:
         raise AssertionError("all-body preview must contain every current shape")
     if not window.grab().save(str(all_bodies_path)):
         raise RuntimeError("could not save all-body UI screenshot")
+    body_camera_before = window.viewer.camera_state()
+    window.body_mode_button.setChecked(True)
+    window.body_picked_from_preview((multi_body.bodies[0].body_index,), Qt.NoModifier)
+    application.processEvents()
+    if not window.ghost_button.isChecked() or not window.ghost_nonselected:
+        raise AssertionError("Body management must start with ghosting enabled")
+    if window.body_management_panel.isHidden():
+        raise AssertionError("Body management panel must be visible in Body mode")
+    groups = {group.body_index: group for group in window.viewer.viewer.body_groups}
+    if groups[multi_body.bodies[0].body_index].opacity != 1.0:
+        raise AssertionError("selected Body must stay opaque")
+    if groups[multi_body.bodies[1].body_index].opacity != 0.25:
+        raise AssertionError("unselected Body must use the default ghost opacity")
+    if window.viewer.camera_state() != body_camera_before:
+        raise AssertionError("Body selection must preserve the camera")
+    window.clear_body_selection()
+    application.processEvents()
+    first_body_item = window.body_tree.topLevelItem(0)
+    second_body_item = window.body_tree.topLevelItem(1)
+    drag_start = window.body_tree.visualItemRect(first_body_item).center()
+    drag_start.setX(window.body_tree.header().sectionPosition(1) + 20)
+    drag_end = window.body_tree.visualItemRect(second_body_item).center()
+    drag_end.setX(drag_start.x())
+    QTest.mousePress(
+        window.body_tree.viewport(),
+        Qt.LeftButton,
+        Qt.NoModifier,
+        drag_start,
+    )
+    QTest.mouseMove(window.body_tree.viewport(), drag_end, delay=20)
+    QTest.mouseRelease(
+        window.body_tree.viewport(),
+        Qt.LeftButton,
+        Qt.NoModifier,
+        drag_end,
+    )
+    application.processEvents()
+    if window.selected_body_ids != {multi_body.bodies[0].body_index}:
+        raise AssertionError("Body-list dragging must not extend the selection")
+    full_body_scene = window.viewer.scene_state()
+    window.viewer.set_view_angles(21.0, -8.0)
+    focus_angles = window.viewer.camera_state()[:2]
+    window.focus_selected_bodies()
+    application.processEvents()
+    if window.viewer.camera_state()[:2] != focus_angles:
+        raise AssertionError("Body focus must preserve the camera orientation")
+    if window.viewer.scene_state() == full_body_scene:
+        raise AssertionError("Body focus must frame the selected Body")
+    window.reset_view()
+    application.processEvents()
+    if window.viewer.scene_state() != full_body_scene:
+        raise AssertionError("Reset View must restore the full Body scene")
+    if not window.grab().save(str(body_management_path)):
+        raise RuntimeError("could not save Body management UI screenshot")
+    window.shortcut_help_button.setChecked(True)
+    application.processEvents()
+    window.page_scroll.verticalScrollBar().setValue(
+        window.page_scroll.verticalScrollBar().maximum()
+    )
+    application.processEvents()
+    if not window.grab().save(str(body_shortcuts_path)):
+        raise RuntimeError("could not save Body management shortcut screenshot")
+    window.shortcut_help_button.setChecked(False)
+    application.processEvents()
+    window.resize(820, 660)
+    application.processEvents()
+    if not window.grab().save(str(body_management_compact_path)):
+        raise RuntimeError("could not save compact Body management UI screenshot")
+    window.resize(980, 790)
+    application.processEvents()
+    window.shape_mode_button.setChecked(True)
+    application.processEvents()
     window.body_selector.setCurrentIndex(2)
     application.processEvents()
     if len(window.viewer.meshes) != len(multi_body.bodies[1].current_meshes):
@@ -317,11 +392,14 @@ def main() -> int:
             rotated_path,
             non_cube_path,
             all_bodies_path,
+            body_management_path,
+            body_shortcuts_path,
+            body_management_compact_path,
             overlap_path,
             english_path,
         )
     }
-    if len(set(hashes.values())) != 9:
+    if len(set(hashes.values())) != 12:
         raise AssertionError("all UI renders must differ")
     if len(analysis.bodies[0].current_boxes) != 4:
         raise AssertionError("current viewer fixture should contain 4 shapes")

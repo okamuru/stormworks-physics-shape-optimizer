@@ -14,5 +14,5 @@ __all__ = [
     "partition_cubes_greedy",
 ]
 
-__version__ = "1.0.0 Alpha"
+__version__ = "1.1.0 Alpha"
 __author__ = "IrisNuiYaMa_164"

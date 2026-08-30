@@ -10,6 +10,7 @@ Rectangle {
     property real panY: 0.0
     property real sceneSpan: 1.0
     property real fitDiameter: 1.0
+    property real ghostOpacity: 0.0
     property int shapeCount: 0
     property quaternion orientation: Qt.quaternion(
         0.9131794572, 0.1941022873, -0.3505367637, -0.0745088905)
@@ -43,6 +44,38 @@ Rectangle {
 
             Model {
                 geometry: PhysicsShapeGeometry {
+                    objectName: "ghostGeometry"
+                }
+                materials: [
+                    DefaultMaterial {
+                        lighting: DefaultMaterial.NoLighting
+                        diffuseColor: "white"
+                        vertexColorsEnabled: true
+                        opacity: root.ghostOpacity
+                        cullMode: Material.BackFaceCulling
+                        depthDrawMode: Material.NeverDepthDraw
+                    }
+                ]
+            }
+
+            Model {
+                geometry: PhysicsShapeOutlineGeometry {
+                    objectName: "ghostOutlines"
+                }
+                materials: [
+                    DefaultMaterial {
+                        lighting: DefaultMaterial.NoLighting
+                        diffuseColor: "#9AA4B2"
+                        opacity: Math.min(root.ghostOpacity, 0.45)
+                        lineWidth: 1.0
+                        cullMode: Material.NoCulling
+                        depthDrawMode: Material.NeverDepthDraw
+                    }
+                ]
+            }
+
+            Model {
+                geometry: PhysicsShapeGeometry {
                     objectName: "physicsGeometry"
                 }
                 materials: [
@@ -67,6 +100,38 @@ Rectangle {
                         diffuseColor: "#D0D5DD"
                         opacity: 1.0
                         lineWidth: 1.0
+                        cullMode: Material.NoCulling
+                        depthDrawMode: Material.NeverDepthDraw
+                    }
+                ]
+            }
+
+            Model {
+                geometry: PhysicsShapeOutlineGeometry {
+                    objectName: "selectionOutlines"
+                }
+                materials: [
+                    DefaultMaterial {
+                        lighting: DefaultMaterial.NoLighting
+                        diffuseColor: "#FDE68A"
+                        opacity: 1.0
+                        lineWidth: 2.0
+                        cullMode: Material.NoCulling
+                        depthDrawMode: Material.NeverDepthDraw
+                    }
+                ]
+            }
+
+            Model {
+                geometry: PhysicsShapeOutlineGeometry {
+                    objectName: "hoverOutlines"
+                }
+                materials: [
+                    DefaultMaterial {
+                        lighting: DefaultMaterial.NoLighting
+                        diffuseColor: "white"
+                        opacity: 1.0
+                        lineWidth: 3.0
                         cullMode: Material.NoCulling
                         depthDrawMode: Material.NeverDepthDraw
                     }

@@ -4,13 +4,18 @@ import unittest
 from swphysics.partition import Box
 from swphysics.portable_merge import PortableMergeGroup
 from swphysics.viewer import (
+    BodyRenderGroup,
     ShapeMesh,
     box_mesh,
     box_vertices,
     face_is_visible,
     merge_group_mesh,
     outward_face_normal,
+    pick_body_candidates,
+    pick_body_candidates_from_bounds,
+    preview_frame,
     project_point,
+    project_body_mesh_bounds,
     rasterize_meshes_rgba,
     rotate_point,
     shade_color,
@@ -24,7 +29,7 @@ class ViewerMathTests(unittest.TestCase):
         self.assertIn((-0.5, -0.5, -0.5), vertices)
         self.assertIn((1.5, 2.5, 3.5), vertices)
 
-    def test_stormworks_preview_mirrors_only_x_without_changing_faces(self):
+    def test_stormworks_preview_rotates_around_y_without_changing_faces(self):
         source = ShapeMesh(
             ((2.0, -3.0, 5.0), (-7.0, 11.0, 13.0), (17.0, 19.0, -23.0)),
             ((0, 1, 2),),
@@ -33,10 +38,25 @@ class ViewerMathTests(unittest.TestCase):
         preview = stormworks_preview_mesh(source)
 
         self.assertEqual(
-            ((-2.0, -3.0, 5.0), (7.0, 11.0, 13.0), (-17.0, 19.0, -23.0)),
+            ((-2.0, -3.0, -5.0), (7.0, 11.0, -13.0), (-17.0, 19.0, 23.0)),
             preview.vertices,
         )
         self.assertEqual(source.faces, preview.faces)
+
+    def test_preview_frame_covers_separated_bodies(self):
+        frame = preview_frame(
+            (
+                box_mesh(Box((-20, 0, 0), (-20, 0, 0))),
+                box_mesh(Box((10, 4, 2), (10, 4, 2))),
+            )
+        )
+
+        self.assertEqual((-5.0, 2.0, 1.0), frame.center)
+        self.assertEqual(31.0, frame.span)
+        self.assertAlmostEqual(
+            math.sqrt(31.0**2 + 5.0**2 + 3.0**2),
+            frame.fit_diameter,
+        )
 
     def test_zero_rotation_preserves_point(self):
         self.assertEqual((1.0, 2.0, 3.0), rotate_point((1.0, 2.0, 3.0), 0.0, 0.0))
@@ -198,6 +218,84 @@ class ViewerMathTests(unittest.TestCase):
 
         offset = (32 * 64 + 32) * 4
         self.assertEqual((0, 235, 0, 255), tuple(pixels[offset : offset + 4]))
+
+    def test_body_picker_returns_overlapping_bodies_nearest_first(self):
+        groups = (
+            BodyRenderGroup(
+                0,
+                (box_mesh(Box((0, 0, 0), (0, 0, 0))),),
+                "#ff0000",
+            ),
+            BodyRenderGroup(
+                1,
+                (box_mesh(Box((0, 0, 2), (0, 0, 2))),),
+                "#00ff00",
+            ),
+        )
+
+        candidates = pick_body_candidates(
+            groups,
+            center=(0.0, 0.0, 1.0),
+            yaw=0.0,
+            pitch=0.0,
+            scale=32.0,
+            viewport=(32.0, 32.0),
+            point=(32.0, 32.0),
+        )
+
+        self.assertEqual((1, 0), candidates)
+
+        projected_bounds = project_body_mesh_bounds(
+            groups,
+            center=(0.0, 0.0, 1.0),
+            yaw=0.0,
+            pitch=0.0,
+            scale=32.0,
+            viewport=(32.0, 32.0),
+        )
+        cached_candidates = pick_body_candidates_from_bounds(
+            projected_bounds,
+            center=(0.0, 0.0, 1.0),
+            yaw=0.0,
+            pitch=0.0,
+            scale=32.0,
+            viewport=(32.0, 32.0),
+            point=(32.0, 32.0),
+        )
+        self.assertEqual(candidates, cached_candidates)
+        self.assertEqual(
+            (),
+            pick_body_candidates_from_bounds(
+                projected_bounds,
+                center=(0.0, 0.0, 1.0),
+                yaw=0.0,
+                pitch=0.0,
+                scale=32.0,
+                viewport=(32.0, 32.0),
+                point=(2.0, 2.0),
+            ),
+        )
+
+    def test_transparent_front_body_blends_over_selected_body_behind_it(self):
+        pixels = rasterize_meshes_rgba(
+            (
+                box_mesh(Box((0, 0, 0), (0, 0, 0))),
+                box_mesh(Box((0, 0, 2), (0, 0, 2))),
+            ),
+            center=(0.0, 0.0, 1.0),
+            yaw=0.0,
+            pitch=0.0,
+            scale=32.0,
+            viewport=(32.0, 32.0),
+            width=64,
+            height=64,
+            shape_colors=("#ff0000", "#00ff00"),
+            shape_opacities=(1.0, 0.25),
+            draw_outlines=False,
+        )
+
+        offset = (32 * 64 + 32) * 4
+        self.assertEqual((176, 59, 0, 255), tuple(pixels[offset : offset + 4]))
 
 
 if __name__ == "__main__":

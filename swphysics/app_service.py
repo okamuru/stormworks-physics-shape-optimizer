@@ -217,7 +217,27 @@ class BodyAnalysis:
     xml_edited_component_count: int = 0
     xml_edited_physics_voxel_count: int = 0
     protected_body: bool = False
+    manually_excluded: bool = False
+    flooder_prediction_excluded: bool = False
     optimization_result: Optional[CachedComponentOrderOptimization] = None
+
+    @property
+    def effective_optimized_shape_count(self) -> Optional[int]:
+        if self.manually_excluded:
+            return self.current_shape_count
+        return self.optimized_shape_count
+
+    @property
+    def effective_optimized_boxes(self) -> Optional[Tuple[Box, ...]]:
+        if self.manually_excluded:
+            return self.current_boxes
+        return self.optimized_boxes
+
+    @property
+    def effective_optimized_meshes(self) -> Optional[Tuple[ShapeMesh, ...]]:
+        if self.manually_excluded:
+            return self.current_meshes
+        return self.optimized_meshes
 
 
 @dataclass(frozen=True)
@@ -242,7 +262,9 @@ class VehicleAnalysis:
     def optimized_shape_count(self) -> Optional[int]:
         if not self.can_optimize:
             return None
-        return sum(body.optimized_shape_count or 0 for body in self.bodies)
+        return sum(
+            body.effective_optimized_shape_count or 0 for body in self.bodies
+        )
 
     @property
     def xml_edited_component_count(self) -> int:
@@ -250,15 +272,95 @@ class VehicleAnalysis:
 
     @property
     def has_partial_shape_coverage(self) -> bool:
-        return self.xml_edited_component_count > 0
+        return bool(
+            self.xml_edited_component_count
+            or self.flooder_prediction_excluded_body_count
+        )
 
     @property
     def protected_body_count(self) -> int:
         return sum(body.protected_body for body in self.bodies)
 
     @property
+    def manually_excluded_body_count(self) -> int:
+        return sum(body.manually_excluded for body in self.bodies)
+
+    @property
+    def partially_optimized_body_count(self) -> int:
+        return sum(
+            bool(body.xml_edited_component_count or body.flooder_prediction_excluded)
+            and not body.protected_body
+            for body in self.bodies
+        )
+
+    @property
+    def flooder_prediction_excluded_body_count(self) -> int:
+        return sum(body.flooder_prediction_excluded for body in self.bodies)
+
+    @property
     def can_optimize(self) -> bool:
         return bool(self.bodies) and all(body.can_optimize for body in self.bodies)
+
+
+def apply_manual_body_exclusions(
+    analysis: VehicleAnalysis,
+    body_indices: Sequence[int],
+) -> VehicleAnalysis:
+    """Return a cached analysis with selected supported Bodies locked.
+
+    The automatic search result is intentionally retained inside each
+    ``BodyAnalysis``.  Toggling a Body back on therefore restores its previous
+    optimized preview immediately and never launches the optimizer again.
+    """
+
+    requested = {int(index) for index in body_indices}
+    available = {body.body_index for body in analysis.bodies}
+    unknown = requested - available
+    if unknown:
+        raise ValueError(
+            "unknown Body index: {}".format(
+                ", ".join(str(index) for index in sorted(unknown))
+            )
+        )
+    return replace(
+        analysis,
+        bodies=tuple(
+            replace(
+                body,
+                manually_excluded=(
+                    body.body_index in requested
+                    and body.can_optimize
+                    and not body.protected_body
+                ),
+            )
+            for body in analysis.bodies
+        ),
+    )
+
+
+def _effective_component_order_result(
+    body: BodyAnalysis,
+) -> Optional[CachedComponentOrderOptimization]:
+    result = body.optimization_result
+    if result is None or not body.manually_excluded:
+        return result
+    if result.component_count != body.component_count:
+        raise ValueError(
+            "body {}の解析済みComponent数が一致しません".format(body.body_index)
+        )
+    identity = array("I", range(body.component_count))
+    if identity.itemsize != 4:
+        raise RuntimeError("this Python runtime does not provide 32-bit array('I')")
+    return CachedComponentOrderOptimization(
+        component_count=body.component_count,
+        packed_optimized_component_order=identity.tobytes(),
+        before=result.before,
+        after=result.before,
+        evaluated_order_count=0,
+        search="manual_body_exclusion_identity",
+        completed_stage_count=0,
+        worker_count=0,
+    )
 
 
 @dataclass(frozen=True)
@@ -413,12 +515,8 @@ def analyze_vehicle(
             body.components,
             static_voxels,
         )
-        protected_body = bool(unmodelled_components)
-        model_excluded_components = (
-            set(range(len(body.components)))
-            if protected_body
-            else set()
-        )
+        protected_body = False
+        model_excluded_components = set(unmodelled_components)
         static_voxel_count_by_component = [0] * len(body.components)
         for voxel in static_voxels:
             static_voxel_count_by_component[voxel.component_index] += 1
@@ -482,6 +580,20 @@ def analyze_vehicle(
             )
             for position, voxels in overlap_groups
         )
+        excluded_component_overlap = bool(
+            unmodelled_components
+            and any(
+                any(
+                    voxel.component_index in unmodelled_components
+                    for voxel in voxels
+                )
+                and any(
+                    voxel.component_index not in unmodelled_components
+                    for voxel in voxels
+                )
+                for _position, voxels in overlap_groups
+            )
+        )
 
         can_optimize = True
         reason = "全physics shape対応のportable exactモデルで最適化できます"
@@ -503,6 +615,7 @@ def analyze_vehicle(
         non_physics_component_count = 0
         multi_voxel_component_count = 0
         partial_volume_excluded_count = 0
+        flooder_prediction_excluded = False
         order_result: Optional[ExactComponentOrderOptimization] = None
         try:
             if flooder_count and not protected_body:
@@ -518,21 +631,48 @@ def analyze_vehicle(
                 )
                 if not flood_fill.supported:
                     unsupported_status = flood_fill.status
-                    del flood_fill
-                    raise UnsupportedVehicleError(
-                        "Physics Flooderの面モデルが未対応です: {}".format(
-                            unsupported_status
+                    missing_surface_components = set(
+                        flood_fill.metadata_missing_component_indices
+                    )
+                    # Unknown surfaces make the filled volume unknowable, but
+                    # they do not have to stop ordering the remaining static
+                    # Components. Keep every affected Component in its source
+                    # slot and omit only the unmodellable fill from scoring.
+                    unmodelled_components.update(missing_surface_components)
+                    model_excluded_components.update(missing_surface_components)
+                    unmodelled_physics_components = {
+                        component_index
+                        for component_index in unmodelled_components
+                        if static_voxel_count_by_component[component_index]
+                    }
+                    unmodelled_physics_voxel_count = sum(
+                        static_voxel_count_by_component[component_index]
+                        for component_index in unmodelled_physics_components
+                    )
+                    grouped_voxels = tuple(
+                        voxel
+                        for voxel in static_voxels
+                        if voxel.component_index not in model_excluded_components
+                    )
+                    trailing_voxels = ()
+                    flooder_prediction_excluded = True
+                    warnings.append(
+                        "Body {}: Physics Flooderの面モデル{}を予測対象外にし、"
+                        "残りのComponentだけを最適化します".format(
+                            body_index,
+                            unsupported_status,
                         )
                     )
-                grouped_voxels = tuple(
-                    voxel
-                    for voxel in flood_fill.static_voxels_after_fill
-                    if voxel.component_index not in model_excluded_components
-                )
-                trailing_voxels = flood_fill.new_fill_voxels
-                partial_volume_excluded_count = (
-                    flood_fill.partial_volume_excluded_count
-                )
+                else:
+                    grouped_voxels = tuple(
+                        voxel
+                        for voxel in flood_fill.static_voxels_after_fill
+                        if voxel.component_index not in model_excluded_components
+                    )
+                    trailing_voxels = flood_fill.new_fill_voxels
+                    partial_volume_excluded_count = (
+                        flood_fill.partial_volume_excluded_count
+                    )
                 # The result also owns the full prepared/static voxel tuples.
                 # Only the two selected sequences and scalar count are needed
                 # below; release the wrapper now so a large Flooder body is
@@ -685,18 +825,21 @@ def analyze_vehicle(
                 ).format(overlap_count, len(overlapping_components))
             if unmodelled_components:
                 reason = (
-                    "XML編集または未対応Shapeの{} Componentがあるため、"
-                    "相互作用を変えないようBody全体を元の順序に固定しました"
+                    "予測対象外の{} Componentを元スロットへ固定し、"
+                    "残りの対応Componentを最適化できます"
                 ).format(len(unmodelled_components))
                 warnings.append(
-                    "Body {}: XML編集または未対応Shapeの{} Component "
-                    "({} physics voxel)を含むためBody全体を順序固定・"
-                    "予測対象外にしました".format(
-                        body_index,
-                        len(unmodelled_components),
-                        unmodelled_physics_voxel_count,
-                    )
+                    "Body {}: 予測対象外の{} Componentを探索から除外して"
+                    "元スロットへ戻します。表示値は対応範囲のみで、最終F2 "
+                    "Shape数には対象外Componentとの相互作用が含まれません"
+                    .format(body_index, len(unmodelled_components))
                 )
+                if excluded_component_overlap:
+                    warnings.append(
+                        "Body {}: 予測対象外Componentと対応Componentに"
+                        "重複physics座標があるため、該当する対応Componentも"
+                        "元の順序位置へ固定しました".format(body_index)
+                    )
             if current.shape_count != order_result.before.shape_count:
                 raise RuntimeError("解析前Shape数が探索入力と一致しません")
         except (UnsupportedVehicleError, ValueError) as error:
@@ -744,6 +887,7 @@ def analyze_vehicle(
                     unmodelled_physics_voxel_count
                 ),
                 protected_body=protected_body,
+                flooder_prediction_excluded=flooder_prediction_excluded,
                 optimization_result=(
                     _cache_component_order_result(order_result)
                     if can_optimize and order_result is not None
@@ -857,7 +1001,7 @@ def save_analyzed_vehicle_copy(
             )
         if len(component_elements) != len(vehicle_body.components):
             raise ValueError("body {} component count mismatch".format(body_index))
-        result = body_analysis.optimization_result
+        result = _effective_component_order_result(body_analysis)
         if result is None:
             raise ValueError("body {}の解析済み順序がありません".format(body_index))
         # Decode only this body's packed permutation while it is being
@@ -934,7 +1078,7 @@ def save_analyzed_vehicle_copy(
                     body_count,
                 ),
             )
-            result = body_analysis.optimization_result
+            result = body_results[body_index].result
             if result is None:
                 raise RuntimeError(
                     "body {}の解析済み順序がありません".format(body_index)

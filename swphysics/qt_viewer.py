@@ -1,9 +1,10 @@
 import math
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QPointF, QTimer, Qt
+from PySide6.QtCore import QPointF, QTimer, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QGuiApplication,
     QImage,
     QMouseEvent,
     QPainter,
@@ -15,11 +16,18 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .partition import Box
 from .viewer import (
+    BodyRenderGroup,
+    ProjectedBodyMeshBounds,
+    PreviewFrame,
     SHAPE_COLORS,
     ShapeMesh,
     box_mesh,
+    face_is_visible,
     outward_face_normal,
+    pick_body_candidates_from_bounds,
+    preview_frame,
     project_point,
+    project_body_mesh_bounds,
     rasterize_meshes_rgba,
     rotate_point,
     shade_color,
@@ -169,6 +177,8 @@ def rasterize_fast_preview(
     width: int,
     height: int,
     max_dimension: int = FAST_PREVIEW_MAX_DIMENSION,
+    shape_colors: Sequence[str] = SHAPE_COLORS,
+    shape_opacities: Optional[Sequence[float]] = None,
 ) -> Tuple[bytearray, int, int]:
     """Render a reduced-resolution preview with exact per-pixel occlusion.
 
@@ -193,6 +203,8 @@ def rasterize_fast_preview(
         (viewport[0] * render_ratio, viewport[1] * render_ratio),
         render_width,
         render_height,
+        shape_colors=shape_colors,
+        shape_opacities=shape_opacities,
         draw_outlines=False,
     )
     return pixels, render_width, render_height
@@ -201,15 +213,29 @@ def rasterize_fast_preview(
 class PhysicsShapeViewer(QWidget):
     """Cross-platform software preview with adaptive interaction quality."""
 
+    bodyPicked = Signal(object, object)
+    bodyHovered = Signal(object)
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.meshes: Tuple[ShapeMesh, ...] = ()
+        self.body_groups: Tuple[BodyRenderGroup, ...] = ()
+        self.body_interaction_enabled = False
+        self.shape_colors: Tuple[str, ...] = SHAPE_COLORS
+        self.shape_opacities: Tuple[float, ...] = ()
+        self.hovered_body_index: Optional[int] = None
+        self._projected_body_bounds: Optional[
+            Tuple[ProjectedBodyMeshBounds, ...]
+        ] = None
         self.yaw = math.radians(-42)
         self.pitch = math.radians(24)
         self.zoom = 1.0
         self.center = (0.0, 0.0, 0.0)
         self.base_scale = 40.0
+        self.preview_frame = preview_frame(())
         self.drag_origin: Optional[QPointF] = None
+        self.press_origin: Optional[QPointF] = None
+        self.drag_moved = False
         self._preview_mode = False
         self._settle_timer = QTimer(self)
         self._settle_timer.setSingleShot(True)
@@ -220,6 +246,7 @@ class PhysicsShapeViewer(QWidget):
         self.empty_message = "解析するとPhysics Shapeがここに表示されます"
         self.setMinimumHeight(320)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMouseTracking(True)
         self.setCursor(Qt.OpenHandCursor)
 
     def set_empty_message(self, message: str) -> None:
@@ -230,13 +257,100 @@ class PhysicsShapeViewer(QWidget):
     def set_boxes(self, boxes: Iterable[Box], fit: bool = True) -> None:
         self.set_shapes((box_mesh(box) for box in boxes), fit=fit)
 
-    def set_shapes(self, meshes: Iterable[ShapeMesh], fit: bool = True) -> None:
+    def set_shapes(
+        self,
+        meshes: Iterable[ShapeMesh],
+        fit: bool = True,
+        frame: Optional[PreviewFrame] = None,
+    ) -> None:
+        self.body_groups = ()
+        self.body_interaction_enabled = False
+        self.hovered_body_index = None
+        self._invalidate_body_pick_cache()
         self.meshes = tuple(meshes)
-        if fit:
+        self.shape_colors = SHAPE_COLORS
+        self.shape_opacities = (1.0,) * len(self.meshes)
+        if frame is not None:
+            self.preview_frame = frame
+        elif fit:
+            self.preview_frame = preview_frame(self.meshes)
+        if fit or frame is not None:
             self.fit_geometry()
         self._invalidate_frame()
         self._begin_preview()
         self.update()
+
+    def set_body_groups(
+        self,
+        groups: Iterable[BodyRenderGroup],
+        fit: bool = True,
+        frame: Optional[PreviewFrame] = None,
+        preserve_view_angles: bool = False,
+    ) -> None:
+        self.body_groups = tuple(group for group in groups if group.opacity > 0.005)
+        self.body_interaction_enabled = True
+        self._invalidate_body_pick_cache()
+        meshes = []
+        colors = []
+        opacities = []
+        for group in self.body_groups:
+            meshes.extend(group.meshes)
+            colors.extend((group.color,) * len(group.meshes))
+            opacities.extend((group.opacity,) * len(group.meshes))
+        self.meshes = tuple(meshes)
+        self.shape_colors = tuple(colors) or SHAPE_COLORS
+        self.shape_opacities = tuple(opacities)
+        if frame is not None:
+            self.preview_frame = frame
+        elif fit:
+            self.preview_frame = preview_frame(self.meshes)
+        if fit and not preserve_view_angles:
+            self.yaw = math.radians(-42)
+            self.pitch = math.radians(24)
+            self.zoom = 1.0
+        elif fit:
+            self.zoom = 1.0
+        if fit or frame is not None:
+            self.fit_geometry()
+        self._invalidate_frame()
+        self._begin_preview()
+        self.update()
+
+    def set_hovered_body(self, body_index: Optional[int]) -> None:
+        if body_index == self.hovered_body_index:
+            return
+        self.hovered_body_index = body_index
+        if self.body_interaction_enabled:
+            self.update()
+
+    def body_candidates_at(self, position: QPointF) -> Tuple[int, ...]:
+        if self._projected_body_bounds is None:
+            self._projected_body_bounds = project_body_mesh_bounds(
+                self.body_groups,
+                self.center,
+                self.yaw,
+                self.pitch,
+                self.base_scale * self.zoom,
+                (self.width() / 2.0, self.height() / 2.0),
+            )
+        return pick_body_candidates_from_bounds(
+            self._projected_body_bounds,
+            self.center,
+            self.yaw,
+            self.pitch,
+            self.base_scale * self.zoom,
+            (self.width() / 2.0, self.height() / 2.0),
+            (position.x(), position.y()),
+        )
+
+    def _invalidate_body_pick_cache(self) -> None:
+        self._projected_body_bounds = None
+
+    def hover_body_at(self, position: QPointF) -> None:
+        candidates = self.body_candidates_at(position)
+        hovered = candidates[0] if candidates else None
+        self.set_hovered_body(hovered)
+        self.bodyHovered.emit(hovered)
 
     def _invalidate_frame(self) -> None:
         self._frame_image = None
@@ -258,25 +372,26 @@ class PhysicsShapeViewer(QWidget):
         self.pitch = math.radians(24)
         self.zoom = 1.0
         self.fit_geometry()
+        self._invalidate_body_pick_cache()
         self._invalidate_frame()
         self._begin_preview()
         self.update()
 
     def fit_geometry(self) -> None:
-        if not self.meshes:
-            self.center = (0.0, 0.0, 0.0)
-            self.base_scale = 40.0
-            return
-        points = tuple(point for mesh in self.meshes for point in mesh.vertices)
-        minimum = [min(point[index] for point in points) for index in range(3)]
-        maximum = [max(point[index] for point in points) for index in range(3)]
-        self.center = tuple((minimum[index] + maximum[index]) / 2 for index in range(3))
-        largest_span = max(maximum[index] - minimum[index] for index in range(3))
+        self.center = self.preview_frame.center
         available = max(240.0, min(float(self.width()), float(self.height())))
-        self.base_scale = max(8.0, available * 0.62 / max(largest_span, 1.0))
+        self.base_scale = max(8.0, available * 0.62 / self.preview_frame.span)
+
+    def scene_state(self) -> Tuple[float, ...]:
+        return (
+            *self.preview_frame.center,
+            self.preview_frame.span,
+            self.preview_frame.fit_diameter,
+        )
 
     def resizeEvent(self, event: object) -> None:
         self.fit_geometry()
+        self._invalidate_body_pick_cache()
         self._invalidate_frame()
         self._begin_preview()
         super().resizeEvent(event)  # type: ignore[arg-type]
@@ -284,40 +399,69 @@ class PhysicsShapeViewer(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
             self.drag_origin = event.position()
+            self.press_origin = event.position()
+            self.drag_moved = False
             self.setCursor(Qt.ClosedHandCursor)
             self._begin_preview()
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
+            was_click = not self.drag_moved
             self.drag_origin = None
+            self.press_origin = None
             self.setCursor(Qt.OpenHandCursor)
             self._preview_mode = False
             self._settle_timer.stop()
             self._invalidate_frame()
             self.update()
+            if was_click and self.body_interaction_enabled:
+                self.bodyPicked.emit(
+                    self.body_candidates_at(event.position()),
+                    QGuiApplication.queryKeyboardModifiers(),
+                )
+            elif self.body_interaction_enabled:
+                self.hover_body_at(event.position())
         super().mouseReleaseEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self.drag_origin is not None and event.buttons() & Qt.LeftButton:
             current = event.position()
-            delta = current - self.drag_origin
+            if not self.drag_moved and self.press_origin is not None:
+                total = current - self.press_origin
+                if abs(total.x()) + abs(total.y()) <= 4.0:
+                    super().mouseMoveEvent(event)
+                    return
+                self.drag_moved = True
+                delta = total
+            else:
+                delta = current - self.drag_origin
             self.drag_origin = current
             self.yaw += delta.x() * 0.012
             self.pitch = max(-1.45, min(1.45, self.pitch + delta.y() * 0.012))
+            self._invalidate_body_pick_cache()
             self._begin_preview()
             self._invalidate_frame()
             self.update()
+        elif self.body_interaction_enabled:
+            self.hover_body_at(event.position())
         super().mouseMoveEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.LeftButton and not self.body_interaction_enabled:
             self.reset_view()
         super().mouseDoubleClickEvent(event)
+
+    def leaveEvent(self, event: object) -> None:
+        if self.drag_origin is None and self.body_interaction_enabled:
+            self.set_hovered_body(None)
+            self.bodyHovered.emit(None)
+        super().leaveEvent(event)  # type: ignore[arg-type]
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         factor = 1.12 if event.angleDelta().y() > 0 else 1 / 1.12
         self.zoom = max(0.2, min(8.0, self.zoom * factor))
+        self._invalidate_body_pick_cache()
         self._begin_preview()
         self._invalidate_frame()
         self.update()
@@ -342,7 +486,10 @@ class PhysicsShapeViewer(QWidget):
     def _draw_fast_preview(
         self, painter: QPainter, viewport: Tuple[float, float], scale: float
     ) -> None:
-        if len(self.meshes) > FAST_PREVIEW_ZBUFFER_SHAPE_LIMIT:
+        if (
+            not self.body_interaction_enabled
+            and len(self.meshes) > FAST_PREVIEW_ZBUFFER_SHAPE_LIMIT
+        ):
             # A reduced Z-buffer still spends time visiting every triangle.
             # Above this limit, draw an opaque single-colour silhouette instead:
             # whole-face ordering can no longer expose a differently-coloured
@@ -372,6 +519,8 @@ class PhysicsShapeViewer(QWidget):
             viewport,
             max(1, self.width()),
             max(1, self.height()),
+            shape_colors=self.shape_colors,
+            shape_opacities=self.shape_opacities,
         )
         if not frame_buffer:
             painter.fillRect(self.rect(), QColor("#101828"))
@@ -385,6 +534,54 @@ class PhysicsShapeViewer(QWidget):
         )
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
         painter.drawImage(self.rect(), frame_image)
+
+    def _draw_body_highlights(
+        self,
+        painter: QPainter,
+        viewport: Tuple[float, float],
+        scale: float,
+    ) -> None:
+        if not self.body_interaction_enabled:
+            return
+
+        def draw_groups(groups: Tuple[BodyRenderGroup, ...], color: str, width: float) -> None:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(color), width))
+            for group in groups:
+                for mesh in group.meshes:
+                    projected = tuple(
+                        project_point(
+                            vertex,
+                            self.center,
+                            self.yaw,
+                            self.pitch,
+                            scale,
+                            viewport,
+                        )
+                        for vertex in mesh.vertices
+                    )
+                    for face in mesh.faces:
+                        if not face_is_visible(mesh, face, self.yaw, self.pitch):
+                            continue
+                        points = [QPointF(projected[index][0], projected[index][1]) for index in face]
+                        if points:
+                            points.append(points[0])
+                            painter.drawPolyline(QPolygonF(points))
+
+        draw_groups(
+            tuple(group for group in self.body_groups if group.selected),
+            "#FDE68A",
+            2.0,
+        )
+        draw_groups(
+            tuple(
+                group
+                for group in self.body_groups
+                if group.body_index == self.hovered_body_index
+            ),
+            "#FFFFFF",
+            3.0,
+        )
 
     def paintEvent(self, event: object) -> None:
         painter = QPainter(self)
@@ -413,6 +610,9 @@ class PhysicsShapeViewer(QWidget):
                 viewport,
                 render_width,
                 render_height,
+                shape_colors=self.shape_colors,
+                shape_opacities=self.shape_opacities,
+                draw_outlines=not self.body_interaction_enabled,
             )
             self._frame_image = QImage(
                 self._frame_buffer,
@@ -423,6 +623,7 @@ class PhysicsShapeViewer(QWidget):
             )
         if not interactive and self._frame_image is not None:
             painter.drawImage(self.rect(), self._frame_image)
+        self._draw_body_highlights(painter, viewport, scale)
         self._draw_axes(painter, (52.0, self.height() - 52.0), min(scale, 36.0))
         painter.setPen(QColor("#F2F4F7"))
         font = painter.font()

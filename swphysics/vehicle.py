@@ -11,6 +11,7 @@ from .definitions import (
     compact_definition_id,
 )
 from .model import (
+    DEFAULT_COMPONENT_ROTATION,
     DefinitionVoxel,
     GridPoint,
     IDENTITY_MATRIX,
@@ -28,12 +29,12 @@ from .model import (
 
 _NUMERIC_ATTRIBUTE_RE = re.compile(r"(\s)([0-9][0-9])=")
 _SANITIZED_NUMERIC_ATTRIBUTE_RE = re.compile(r"m[0-9][0-9]")
-MAX_MICROPROCESSOR_WIDTH = 6
-MAX_MICROPROCESSOR_LENGTH = 6
+MAX_MICROPROCESSOR_WIDTH = 32
+MAX_MICROPROCESSOR_LENGTH = 32
 
 
 def _validated_microprocessor_cell_count(width: int, length: int) -> int:
-    """Reject corrupted dimensions before expanding dynamic Definition data."""
+    """Bound XML-edited dimensions before expanding dynamic Definition data."""
 
     if width < 1 or length < 1:
         raise ValueError(
@@ -241,6 +242,15 @@ class Vehicle:
 def load_vehicle(path: Path) -> Vehicle:
     source_path = Path(path)
     root = parse_vehicle_tree(source_path).getroot()
+    data_version = root.attrib.get("data_version", "")
+    # Legacy version 0 takes the typed matrix-parser path, whose omitted value
+    # is identity.  Current versions take the compact string-parser path and
+    # use the editor's native component orientation below.
+    default_component_rotation = (
+        IDENTITY_MATRIX
+        if parse_fixed_point_int(data_version) == 0
+        else DEFAULT_COMPONENT_ROTATION
+    )
     bodies = []
     for body_index, body_element in enumerate(root.findall("./bodies/body")):
         placements = []
@@ -251,7 +261,11 @@ def load_vehicle(path: Path) -> Vehicle:
                 object_attributes = object_element.attrib if object_element is not None else {}
                 position_element = object_element.find("vp") if object_element is not None else None
                 position = point_from_attributes(position_element.attrib if position_element is not None else {})
-                rotation = parse_matrix(object_attributes["r"]) if "r" in object_attributes else IDENTITY_MATRIX
+                rotation = (
+                    parse_matrix(object_attributes["r"])
+                    if "r" in object_attributes
+                    else default_component_rotation
+                )
                 microprocessor_definition = (
                     object_element.find("microprocessor_definition")
                     if object_element is not None
@@ -301,6 +315,6 @@ def load_vehicle(path: Path) -> Vehicle:
         )
     return Vehicle(
         source_path=source_path,
-        data_version=root.attrib.get("data_version", ""),
+        data_version=data_version,
         bodies=tuple(bodies),
     )

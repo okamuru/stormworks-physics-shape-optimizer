@@ -56,5 +56,5 @@ Copyright (c) 2026 IrisNuiYaMa_164
 
 ## バージョン情報
 
-- バージョン: 1.0.0 Alpha
+- バージョン: 1.1.0 Alpha
 - 作者: IrisNuiYaMa_164

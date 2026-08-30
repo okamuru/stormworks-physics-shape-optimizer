@@ -9,11 +9,12 @@ from swphysics.gpu_viewer import (
     GPU_VERTEX_STRIDE,
     build_gpu_geometry,
     build_gpu_outlines,
+    combine_gpu_outlines,
     legacy_orbit_angles,
     legacy_view_orientation,
 )
 from swphysics.partition import Box
-from swphysics.viewer import box_mesh, rotate_point
+from swphysics.viewer import box_mesh, preview_frame, rotate_point
 
 
 class GpuGeometryTests(unittest.TestCase):
@@ -61,6 +62,55 @@ class GpuGeometryTests(unittest.TestCase):
         self.assertEqual(12, outlines.segment_count)
         self.assertEqual(24, outlines.vertex_count)
         self.assertEqual(24 * GPU_LINE_VERTEX_STRIDE, len(outlines.vertex_data))
+
+    def test_body_outline_streams_can_be_combined_without_triangle_geometry(self):
+        left = build_gpu_outlines(
+            (box_mesh(Box((-2, 0, 0), (-2, 0, 0))),),
+            center=(0.0, 0.0, 0.0),
+        )
+        right = build_gpu_outlines(
+            (box_mesh(Box((3, 0, 0), (3, 0, 0))),),
+            center=(0.0, 0.0, 0.0),
+        )
+
+        combined = combine_gpu_outlines((left, right))
+
+        self.assertEqual(24, combined.segment_count)
+        self.assertEqual(48, combined.vertex_count)
+        self.assertEqual(left.vertex_data + right.vertex_data, combined.vertex_data)
+        self.assertEqual((-2.5, -0.5, -0.5), combined.bounds_min)
+        self.assertEqual((3.5, 0.5, 0.5), combined.bounds_max)
+
+    def test_filtered_geometry_keeps_its_offset_from_the_full_scene_center(self):
+        left = box_mesh(Box((-20, 0, 0), (-20, 0, 0)))
+        right = box_mesh(Box((10, 0, 0), (10, 0, 0)))
+        frame = preview_frame((left, right))
+
+        geometry = build_gpu_geometry((left,), center=frame.center)
+        x_positions = tuple(
+            struct.unpack_from("<7f", geometry.vertex_data, offset)[0]
+            for offset in range(0, len(geometry.vertex_data), GPU_VERTEX_STRIDE)
+        )
+
+        self.assertEqual(frame.center, geometry.center)
+        self.assertEqual((-15.5, -14.5), (min(x_positions), max(x_positions)))
+
+    def test_gpu_geometry_accepts_stable_per_body_shape_colors(self):
+        cube = box_mesh(Box((0, 0, 0), (0, 0, 0)))
+        geometry = build_gpu_geometry(
+            (cube, cube),
+            shape_colors=("#ff0000", "#00ff00"),
+        )
+        first = struct.unpack_from("<7f", geometry.vertex_data, 0)
+        second = struct.unpack_from(
+            "<7f",
+            geometry.vertex_data,
+            36 * GPU_VERTEX_STRIDE,
+        )
+
+        self.assertGreater(first[3], first[4])
+        self.assertGreater(second[4], second[3])
+        self.assertEqual((1.0, 1.0), (first[6], second[6]))
 
     def test_legacy_orbit_matches_software_viewer_sensitivity_and_clamp(self):
         yaw, pitch = legacy_orbit_angles(0.2, -0.3, 10.0, 20.0)

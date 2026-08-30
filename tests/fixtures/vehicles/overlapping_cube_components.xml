@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <vehicle data_version="3"><authors/><bodies><body unique_id="23"><components>
-  <c d="custom_two"><o><vp/></o></c>
+  <c d="custom_two"><o r="1,0,0,0,1,0,0,0,1"><vp/></o></c>
   <c><o><vp x="1"/></o></c>
 </components></body></bodies></vehicle>

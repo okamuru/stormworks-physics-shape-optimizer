@@ -1,7 +1,7 @@
 import math
 from dataclasses import dataclass
 from itertools import combinations
-from typing import List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 from .partition import Box
 from .portable_merge import Plane, PortableMergeGroup
@@ -18,18 +18,81 @@ class ShapeMesh:
     faces: Tuple[Tuple[int, ...], ...]
 
 
-def stormworks_preview_mesh(mesh: ShapeMesh) -> ShapeMesh:
-    """Convert Stormworks vehicle X into the game's F2 screen convention.
+@dataclass(frozen=True)
+class BodyRenderGroup:
+    """One Body's preview meshes and presentation-only render state."""
 
-    A same-frame top-down comparison shows that the game and this viewer agree
-    on vertical placement but put every asymmetric landmark on the opposite
-    horizontal side.  Keep that handedness conversion at the display boundary
-    so merge groups, optimization order, and source-preserving XML remain in
-    the native Stormworks coordinate system.
+    body_index: int
+    meshes: Tuple[ShapeMesh, ...]
+    color: str
+    opacity: float = 1.0
+    selected: bool = False
+
+
+@dataclass(frozen=True)
+class ProjectedBodyMeshBounds:
+    """Cheap screen-space rejection data for one Body mesh."""
+
+    body_index: int
+    mesh: ShapeMesh
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
+
+
+@dataclass(frozen=True)
+class PreviewFrame:
+    """Stable world-space framing shared by every preview scope."""
+
+    center: Point3
+    span: float
+    fit_diameter: float
+
+
+def preview_frame(meshes: Iterable[ShapeMesh]) -> PreviewFrame:
+    """Measure a scene without retaining another copy of its mesh collection."""
+
+    minimum: Optional[List[float]] = None
+    maximum: Optional[List[float]] = None
+    for mesh in meshes:
+        for point in mesh.vertices:
+            if minimum is None:
+                minimum = list(point)
+                maximum = list(point)
+                continue
+            assert maximum is not None
+            for axis in range(3):
+                minimum[axis] = min(minimum[axis], point[axis])
+                maximum[axis] = max(maximum[axis], point[axis])
+    if minimum is None or maximum is None:
+        return PreviewFrame((0.0, 0.0, 0.0), 1.0, 1.0)
+    spans = tuple(maximum[axis] - minimum[axis] for axis in range(3))
+    return PreviewFrame(
+        (
+            (minimum[0] + maximum[0]) / 2.0,
+            (minimum[1] + maximum[1]) / 2.0,
+            (minimum[2] + maximum[2]) / 2.0,
+        ),
+        max(max(spans), 1.0),
+        max(math.sqrt(sum(value * value for value in spans)), 1.0),
+    )
+
+
+def stormworks_preview_mesh(mesh: ShapeMesh) -> ShapeMesh:
+    """Convert native vehicle axes into the game's F2 screen convention.
+
+    A same-frame top-down comparison puts both horizontal vehicle axes on the
+    opposite side of this viewer's default camera.  Rotate the preview 180
+    degrees about vehicle Y rather than reflecting only X; the latter fixes
+    left/right landmarks but reverses the visible slope of asymmetric wedges
+    along Z.  Keep this display-only conversion at the renderer boundary so
+    merge groups, optimization order, and source-preserving XML remain in the
+    native Stormworks coordinate system.
     """
 
     return ShapeMesh(
-        tuple((-x, y, z) for x, y, z in mesh.vertices),
+        tuple((-x, y, -z) for x, y, z in mesh.vertices),
         mesh.faces,
     )
 
@@ -277,6 +340,158 @@ def project_point(
     return (viewport[0] + x * scale, viewport[1] - y * scale, depth)
 
 
+def _triangle_depth_at_point(
+    point: Point2,
+    first: Tuple[float, float, float],
+    second: Tuple[float, float, float],
+    third: Tuple[float, float, float],
+) -> Optional[float]:
+    """Return interpolated depth when a screen point is inside a triangle."""
+
+    denominator = (
+        (second[1] - third[1]) * (first[0] - third[0])
+        + (third[0] - second[0]) * (first[1] - third[1])
+    )
+    if abs(denominator) < 1e-12:
+        return None
+    first_weight = (
+        (second[1] - third[1]) * (point[0] - third[0])
+        + (third[0] - second[0]) * (point[1] - third[1])
+    ) / denominator
+    second_weight = (
+        (third[1] - first[1]) * (point[0] - third[0])
+        + (first[0] - third[0]) * (point[1] - third[1])
+    ) / denominator
+    third_weight = 1.0 - first_weight - second_weight
+    if min(first_weight, second_weight, third_weight) < -1e-7:
+        return None
+    return (
+        first_weight * first[2]
+        + second_weight * second[2]
+        + third_weight * third[2]
+    )
+
+
+def pick_body_candidates(
+    groups: Sequence[BodyRenderGroup],
+    center: Point3,
+    yaw: float,
+    pitch: float,
+    scale: float,
+    viewport: Point2,
+    point: Point2,
+) -> Tuple[int, ...]:
+    """Return every Body below a screen point, nearest first."""
+
+    body_depths = {}
+    for group in groups:
+        if group.opacity <= 0.005:
+            continue
+        for mesh in group.meshes:
+            projected = tuple(
+                project_point(vertex, center, yaw, pitch, scale, viewport)
+                for vertex in mesh.vertices
+            )
+            for face in mesh.faces:
+                if len(face) < 3 or not face_is_visible(mesh, face, yaw, pitch):
+                    continue
+                face_points = tuple(projected[index] for index in face)
+                for offset in range(1, len(face_points) - 1):
+                    depth = _triangle_depth_at_point(
+                        point,
+                        face_points[0],
+                        face_points[offset],
+                        face_points[offset + 1],
+                    )
+                    if depth is not None:
+                        body_depths[group.body_index] = max(
+                            depth,
+                            body_depths.get(group.body_index, float("-inf")),
+                        )
+    return tuple(
+        body_index
+        for body_index, _depth in sorted(
+            body_depths.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    )
+
+
+def project_body_mesh_bounds(
+    groups: Sequence[BodyRenderGroup],
+    center: Point3,
+    yaw: float,
+    pitch: float,
+    scale: float,
+    viewport: Point2,
+) -> Tuple[ProjectedBodyMeshBounds, ...]:
+    """Project each mesh once so repeated pointer hits avoid a full face scan."""
+
+    projected_bounds = []
+    for group in groups:
+        if group.opacity <= 0.005:
+            continue
+        for mesh in group.meshes:
+            projected = tuple(
+                project_point(vertex, center, yaw, pitch, scale, viewport)
+                for vertex in mesh.vertices
+            )
+            if not projected:
+                continue
+            projected_bounds.append(
+                ProjectedBodyMeshBounds(
+                    body_index=group.body_index,
+                    mesh=mesh,
+                    min_x=min(point[0] for point in projected),
+                    min_y=min(point[1] for point in projected),
+                    max_x=max(point[0] for point in projected),
+                    max_y=max(point[1] for point in projected),
+                )
+            )
+    return tuple(projected_bounds)
+
+
+def pick_body_candidates_from_bounds(
+    bounds: Sequence[ProjectedBodyMeshBounds],
+    center: Point3,
+    yaw: float,
+    pitch: float,
+    scale: float,
+    viewport: Point2,
+    point: Point2,
+    padding: float = 1.5,
+) -> Tuple[int, ...]:
+    """Run the exact hit test only for meshes whose projected bounds match."""
+
+    meshes_by_body = {}
+    for bound in bounds:
+        if not (
+            bound.min_x - padding <= point[0] <= bound.max_x + padding
+            and bound.min_y - padding <= point[1] <= bound.max_y + padding
+        ):
+            continue
+        meshes_by_body.setdefault(bound.body_index, []).append(bound.mesh)
+    if not meshes_by_body:
+        return ()
+    candidates = tuple(
+        BodyRenderGroup(
+            body_index=body_index,
+            meshes=tuple(meshes),
+            color="#FFFFFF",
+        )
+        for body_index, meshes in meshes_by_body.items()
+    )
+    return pick_body_candidates(
+        candidates,
+        center,
+        yaw,
+        pitch,
+        scale,
+        viewport,
+        point,
+    )
+
+
 def shade_color(hex_color: str, factor: float) -> str:
     raw = hex_color.lstrip("#")
     channels = [int(raw[index : index + 2], 16) for index in (0, 2, 4)]
@@ -300,6 +515,23 @@ def _write_pixel(pixels: bytearray, index: int, color: RGBA) -> None:
     pixels[offset + 1] = color[1]
     pixels[offset + 2] = color[2]
     pixels[offset + 3] = color[3]
+
+
+def _blend_pixel(pixels: bytearray, index: int, color: RGBA) -> None:
+    """Composite one straight-alpha colour over an opaque target pixel."""
+
+    alpha = color[3] / 255.0
+    if alpha <= 0.0:
+        return
+    if alpha >= 1.0:
+        _write_pixel(pixels, index, color)
+        return
+    offset = index * 4
+    inverse = 1.0 - alpha
+    pixels[offset] = round(color[0] * alpha + pixels[offset] * inverse)
+    pixels[offset + 1] = round(color[1] * alpha + pixels[offset + 1] * inverse)
+    pixels[offset + 2] = round(color[2] * alpha + pixels[offset + 2] * inverse)
+    pixels[offset + 3] = 255
 
 
 def _rasterize_triangle(
@@ -363,6 +595,69 @@ def _rasterize_triangle(
             pixel_index += 1
 
 
+def _rasterize_transparent_triangle(
+    points: Sequence[Tuple[float, float, float]],
+    width: int,
+    height: int,
+    opaque_depths: Sequence[float],
+    layer_depths: List[float],
+    layer_priorities: List[int],
+    layer_pixels: bytearray,
+    color: RGBA,
+    priority: int,
+) -> None:
+    """Keep the nearest transparent fragment that is in front of opaque data."""
+
+    minimum_y = max(0, math.ceil(min(point[1] for point in points) - 0.5))
+    maximum_y = min(
+        height - 1, math.floor(max(point[1] for point in points) - 0.5)
+    )
+    if minimum_y > maximum_y:
+        return
+    edges = ((points[0], points[1]), (points[1], points[2]), (points[2], points[0]))
+    for y in range(minimum_y, maximum_y + 1):
+        sample_y = y + 0.5
+        intersections = []
+        for start, end in edges:
+            low = min(start[1], end[1])
+            high = max(start[1], end[1])
+            if not (low <= sample_y < high) or abs(end[1] - start[1]) < 1e-12:
+                continue
+            fraction = (sample_y - start[1]) / (end[1] - start[1])
+            intersections.append(
+                (
+                    start[0] + (end[0] - start[0]) * fraction,
+                    start[2] + (end[2] - start[2]) * fraction,
+                )
+            )
+        if len(intersections) < 2:
+            continue
+        intersections.sort(key=lambda item: item[0])
+        left_x, left_depth = intersections[0]
+        right_x, right_depth = intersections[-1]
+        if right_x - left_x < 1e-12:
+            continue
+        minimum_x = max(0, math.ceil(left_x - 0.5))
+        maximum_x = min(width - 1, math.floor(right_x - 0.5))
+        if minimum_x > maximum_x:
+            continue
+        depth_step = (right_depth - left_depth) / (right_x - left_x)
+        depth = left_depth + ((minimum_x + 0.5) - left_x) * depth_step
+        pixel_index = y * width + minimum_x
+        for _x in range(minimum_x, maximum_x + 1):
+            if depth > opaque_depths[pixel_index] + 1e-7:
+                previous_depth = layer_depths[pixel_index]
+                if depth > previous_depth + 1e-7 or (
+                    abs(depth - previous_depth) <= 1e-7
+                    and priority >= layer_priorities[pixel_index]
+                ):
+                    layer_depths[pixel_index] = depth
+                    layer_priorities[pixel_index] = priority
+                    _write_pixel(layer_pixels, pixel_index, color)
+            depth += depth_step
+            pixel_index += 1
+
+
 def _rasterize_depth_line(
     start: Tuple[float, float, float],
     end: Tuple[float, float, float],
@@ -405,6 +700,7 @@ def rasterize_meshes_rgba(
     width: int,
     height: int,
     shape_colors: Sequence[str] = SHAPE_COLORS,
+    shape_opacities: Optional[Sequence[float]] = None,
     background: str = "#101828",
     outline: str = "#D0D5DD",
     draw_outlines: bool = True,
@@ -426,7 +722,11 @@ def rasterize_meshes_rgba(
     shade_factors = (0.72, 0.92, 0.62, 1.08, 0.82, 0.98, 0.76, 1.02)
     visible_edges = []
 
+    opacities = shape_opacities or (1.0,) * len(meshes)
     for shape_index, mesh in enumerate(meshes):
+        opacity = opacities[shape_index % len(opacities)]
+        if opacity < 0.995:
+            continue
         projected = tuple(
             project_point(vertex, center, yaw, pitch, scale, viewport)
             for vertex in mesh.vertices
@@ -461,6 +761,59 @@ def rasterize_meshes_rgba(
                         priority,
                     )
                     for index in range(len(face_points))
+                )
+
+    transparent_indices = tuple(
+        index
+        for index in range(len(meshes))
+        if 0.005 < opacities[index % len(opacities)] < 0.995
+    )
+    if transparent_indices:
+        layer_depths = [float("-inf")] * (width * height)
+        layer_priorities = [-1] * (width * height)
+        layer_pixels = bytearray(width * height * 4)
+        for shape_index in transparent_indices:
+            mesh = meshes[shape_index]
+            opacity = opacities[shape_index % len(opacities)]
+            projected = tuple(
+                project_point(vertex, center, yaw, pitch, scale, viewport)
+                for vertex in mesh.vertices
+            )
+            for face_index, indices in enumerate(mesh.faces):
+                if not face_is_visible(mesh, indices, yaw, pitch):
+                    continue
+                face_points = tuple(projected[index] for index in indices)
+                shaded = _rgba(
+                    shade_color(
+                        shape_colors[shape_index % len(shape_colors)],
+                        shade_factors[face_index % len(shade_factors)],
+                    )
+                )
+                color = (shaded[0], shaded[1], shaded[2], round(opacity * 255))
+                priority = shape_index * 256 + face_index
+                for offset in range(1, len(face_points) - 1):
+                    _rasterize_transparent_triangle(
+                        (
+                            face_points[0],
+                            face_points[offset],
+                            face_points[offset + 1],
+                        ),
+                        width,
+                        height,
+                        depths,
+                        layer_depths,
+                        layer_priorities,
+                        layer_pixels,
+                        color,
+                        priority,
+                    )
+        for pixel_index in range(width * height):
+            offset = pixel_index * 4
+            if layer_pixels[offset + 3]:
+                _blend_pixel(
+                    pixels,
+                    pixel_index,
+                    tuple(layer_pixels[offset : offset + 4]),  # type: ignore[arg-type]
                 )
 
     if draw_outlines:

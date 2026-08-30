@@ -29,7 +29,7 @@ QT_QPA_PLATFORM=offscreen "$BUILD_PYTHON" tools/qt_ui_smoke.py \
   --output-dir "$PROJECT_DIR/build/ui-smoke"
 
 mkdir -p "$PROJECT_DIR/release"
-RELEASE_DIR="$PROJECT_DIR/release/Stormworks Physics Shape Optimizer 1.0.0 Alpha macOS"
+RELEASE_DIR="$PROJECT_DIR/release/Stormworks Physics Shape Optimizer 1.1.0 Alpha macOS"
 mkdir -p "$RELEASE_DIR"
 ditto "$APP_PATH" "$RELEASE_DIR/Stormworks Physics Shape Optimizer.app"
 cp "$PROJECT_DIR/APP_README.md" "$RELEASE_DIR/APP_README.md"
@@ -41,7 +41,7 @@ rm -rf "$RELEASE_DIR/LICENSES"
 cp -R "$PROJECT_DIR/LICENSES" "$RELEASE_DIR/LICENSES"
 find "$RELEASE_DIR" -maxdepth 1 -iname 'RELEASE_NOTES*.txt' -delete
 ditto -c -k --norsrc --noextattr --keepParent "$RELEASE_DIR" \
-  "$PROJECT_DIR/release/Stormworks Physics Shape Optimizer 1.0.0 Alpha macOS.zip"
-shasum -a 256 "$PROJECT_DIR/release/Stormworks Physics Shape Optimizer 1.0.0 Alpha macOS.zip"
+  "$PROJECT_DIR/release/Stormworks Physics Shape Optimizer 1.1.0 Alpha macOS.zip"
+shasum -a 256 "$PROJECT_DIR/release/Stormworks Physics Shape Optimizer 1.1.0 Alpha macOS.zip"
 
 print "Built: $APP_PATH"

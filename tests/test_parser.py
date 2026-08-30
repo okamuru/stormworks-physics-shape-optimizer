@@ -4,7 +4,12 @@ import tempfile
 import unittest
 
 from swphysics.definitions import DefinitionCatalog
-from swphysics.model import apply_matrix, multiply_matrices, parse_matrix
+from swphysics.model import (
+    DEFAULT_COMPONENT_ROTATION,
+    apply_matrix,
+    multiply_matrices,
+    parse_matrix,
+)
 from swphysics.vehicle import load_vehicle
 
 
@@ -61,6 +66,14 @@ class ParserTests(unittest.TestCase):
         self.assertEqual("01_block", vehicle.bodies[0].components[0].definition_id)
         self.assertEqual((0, 2, 0), vehicle.bodies[0].components[1].position)
 
+    def test_omitted_component_rotation_uses_native_parser_default(self):
+        vehicle = load_vehicle(FIXTURES / "vehicles" / "order_b.xml")
+
+        self.assertEqual(
+            DEFAULT_COMPONENT_ROTATION,
+            vehicle.bodies[0].components[0].rotation,
+        )
+
     def test_t_is_transform_index_not_basic_definition_type(self):
         text = '''<vehicle data_version="3"><bodies><body><components>
 <c t="1"><o><vp x="4"/></o></c>
@@ -72,7 +85,10 @@ class ParserTests(unittest.TestCase):
             components = load_vehicle(path).bodies[0].components
             self.assertEqual("01_block", components[0].definition_id)
             self.assertEqual(1, components[0].transform_index)
-            self.assertEqual((-1, 0, 0, 0, 1, 0, 0, 0, 1), components[0].effective_transform)
+            self.assertEqual(
+                (0, 0, -1, -1, 0, 0, 0, -1, 0),
+                components[0].effective_transform,
+            )
             self.assertEqual("02_wedge", components[1].definition_id)
             self.assertEqual(2, components[1].transform_index)
 
@@ -86,6 +102,10 @@ class ParserTests(unittest.TestCase):
             component = load_vehicle(path).bodies[0].components[0]
             self.assertEqual("02_wedge", component.definition_id)
             self.assertEqual(4, component.transform_index)
+            self.assertEqual(
+                (1, 0, 0, 0, 1, 0, 0, 0, 1),
+                component.rotation,
+            )
 
     def test_definition_voxels_rotation_and_flags(self):
         catalog = DefinitionCatalog(FIXTURES / "definitions")

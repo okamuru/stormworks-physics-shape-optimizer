@@ -52,6 +52,7 @@ class SurfaceFloodFillResult:
     native_ignored_surface_count: int
     stormworks_build_id: str
     binary_sha256: str
+    metadata_missing_component_indices: Tuple[int, ...] = ()
 
     @property
     def all_voxels(self) -> Tuple[WorldVoxel, ...]:
@@ -69,6 +70,7 @@ class _BodySurfaceAnalysis:
     bits: Dict[GridPoint, int]
     vertex_bounds: Optional[Tuple[Point3, Point3]]
     metadata_missing_count: int
+    metadata_missing_component_indices: Tuple[int, ...]
     native_ignored_count: int
 
 
@@ -86,6 +88,7 @@ def _build_body_surface_analysis(
     minimum: Optional[List[int]] = None
     maximum: Optional[List[int]] = None
     metadata_missing_count = 0
+    metadata_missing_component_indices: Set[int] = set()
     native_ignored_count = 0
 
     for component_index, component in enumerate(
@@ -159,6 +162,8 @@ def _build_body_surface_analysis(
 
         pairs, missing, ignored, local_minimum, local_maximum = template
         metadata_missing_count += missing
+        if missing:
+            metadata_missing_component_indices.add(component_index)
         native_ignored_count += ignored
         for primary, flipped in pairs:
             for local_position, surface_type in (primary, flipped):
@@ -192,6 +197,9 @@ def _build_body_surface_analysis(
         bits=bits_by_position,
         vertex_bounds=bounds,  # type: ignore[arg-type]
         metadata_missing_count=metadata_missing_count,
+        metadata_missing_component_indices=tuple(
+            sorted(metadata_missing_component_indices)
+        ),
         native_ignored_count=native_ignored_count,
     )
 
@@ -787,6 +795,7 @@ def model_surface_physics_flood_fill(
         if definition.water_component_type == 19
     )
     metadata_missing_count = 0
+    metadata_missing_component_indices: Tuple[int, ...] = ()
     native_ignored_count = 0
 
     def result(
@@ -819,6 +828,9 @@ def model_surface_physics_flood_fill(
             blocked_microedge_count=blocked_count,
             partial_volume_excluded_count=partial_excluded_count,
             metadata_missing_surface_count=metadata_missing_count,
+            metadata_missing_component_indices=(
+                metadata_missing_component_indices
+            ),
             native_ignored_surface_count=native_ignored_count,
             stormworks_build_id=native.stormworks_build_id,
             binary_sha256=native.binary_sha256,
@@ -837,6 +849,9 @@ def model_surface_physics_flood_fill(
         resolved_component_definitions,
     )
     metadata_missing_count = surface_analysis.metadata_missing_count
+    metadata_missing_component_indices = (
+        surface_analysis.metadata_missing_component_indices
+    )
     native_ignored_count = surface_analysis.native_ignored_count
     if metadata_missing_count:
         report(1.0, "未知のbuoyancy Surfaceを検出")
