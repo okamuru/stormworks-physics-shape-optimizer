@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<vehicle data_version="3">
+  <authors/>
+  <bodies>
+    <body unique_id="21">
+      <components>
+        <c d="custom_two"><o bc="AA0000"><vp y="1"/></o></c>
+        <c d="custom_two"><o bc="00AA00"><vp/></o></c>
+        <c d="custom_two"><o r="0,1,0,-1,0,0,0,0,1" bc="0000AA"><vp x="2" y="1"/></o></c>
+      </components>
+    </body>
+  </bodies>
+</vehicle>

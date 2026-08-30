@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<vehicle data_version="3"><authors/><bodies><body unique_id="7"><components>
+  <c d="custom_two"><o r="0,-1,0,1,0,0,0,0,1"><vp x="5" y="6" z="7"/></o></c>
+  <c d="02_wedge"><o><vp x="9" y="8" z="7"/></o></c>
+</components></body></bodies></vehicle>

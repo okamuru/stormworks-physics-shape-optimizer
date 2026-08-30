@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Microprocessor" type="37" flags="0">
+  <surfaces/>
+  <buoyancy_surfaces/>
+  <voxels>
+    <voxel flags="1" physics_shape="0">
+      <position x="0" y="0" z="0"/>
+    </voxel>
+  </voxels>
+</definition>

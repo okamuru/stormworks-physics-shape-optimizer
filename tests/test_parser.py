@@ -1,0 +1,210 @@
+from pathlib import Path
+import struct
+import tempfile
+import unittest
+
+from swphysics.definitions import DefinitionCatalog
+from swphysics.model import apply_matrix, multiply_matrices, parse_matrix
+from swphysics.vehicle import load_vehicle
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+class ParserTests(unittest.TestCase):
+    def test_vehicle_parser_accepts_utf8_bom_without_utf8_sig_codec(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bom_vehicle.xml"
+            path.write_bytes(
+                b"\xef\xbb\xbf<vehicle data_version=\"3\"><bodies/></vehicle>"
+            )
+            vehicle = load_vehicle(path)
+            self.assertEqual("3", vehicle.data_version)
+            self.assertEqual((), vehicle.bodies)
+
+    def test_stormworks_matrices_use_column_major_serialization(self):
+        x_to_y = (0, 1, 0, -1, 0, 0, 0, 0, 1)
+        y_to_z = (1, 0, 0, 0, 0, 1, 0, -1, 0)
+        self.assertEqual((0, 1, 0), apply_matrix(x_to_y, (1, 0, 0)))
+        combined = multiply_matrices(y_to_z, x_to_y)
+        self.assertEqual((0, 0, 1), apply_matrix(combined, (1, 0, 0)))
+
+    def test_matrix_parser_matches_game_atoll_integer_prefix_behavior(self):
+        self.assertEqual(
+            (0, 0, 1, -1, 2, -2, 0, 0, 1),
+            parse_matrix(
+                "-0.218,0.75,1.064,-1.7,2.9,-2.9,garbage,,1"
+            ),
+        )
+
+    def test_definition_physics_rotation_keeps_native_xml_storage_order(self):
+        text = '''<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Asymmetric Rotation"><voxels>
+<voxel flags="1" physics_shape="1"><position/>
+<physics_shape_rotation 00="0" 01="-1" 02="0" 10="0" 11="0" 12="1" 20="-1" 21="0" 22="0"/>
+</voxel></voxels></definition>'''
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "asymmetric_rotation.xml"
+            path.write_text(text, encoding="utf-8")
+            rotation = DefinitionCatalog(Path(temporary_directory)).load(
+                "asymmetric_rotation"
+            ).voxels[0].physics_rotation
+        self.assertEqual(
+            (0, -1, 0, 0, 0, 1, -1, 0, 0),
+            rotation,
+        )
+        self.assertEqual((0, -1, 0), apply_matrix(rotation, (1, 0, 0)))
+
+    def test_component_order_and_default_definition(self):
+        vehicle = load_vehicle(FIXTURES / "vehicles" / "order_b.xml")
+        self.assertEqual(1, len(vehicle.bodies))
+        self.assertEqual("01_block", vehicle.bodies[0].components[0].definition_id)
+        self.assertEqual((0, 2, 0), vehicle.bodies[0].components[1].position)
+
+    def test_t_is_transform_index_not_basic_definition_type(self):
+        text = '''<vehicle data_version="3"><bodies><body><components>
+<c t="1"><o><vp x="4"/></o></c>
+<c d="02_wedge" t="2"><o><vp/></o></c>
+</components></body></bodies></vehicle>'''
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "transforms.xml"
+            path.write_text(text, encoding="utf-8")
+            components = load_vehicle(path).bodies[0].components
+            self.assertEqual("01_block", components[0].definition_id)
+            self.assertEqual(1, components[0].transform_index)
+            self.assertEqual((-1, 0, 0, 0, 1, 0, 0, 0, 1), components[0].effective_transform)
+            self.assertEqual("02_wedge", components[1].definition_id)
+            self.assertEqual(2, components[1].transform_index)
+
+    def test_legacy_definition_and_trans_index_are_supported(self):
+        text = '''<vehicle><bodies><body><components>
+<c definition="02_wedge" trans_index="4"><o><vp/></o></c>
+</components></body></bodies></vehicle>'''
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "legacy.xml"
+            path.write_text(text, encoding="utf-8")
+            component = load_vehicle(path).bodies[0].components[0]
+            self.assertEqual("02_wedge", component.definition_id)
+            self.assertEqual(4, component.transform_index)
+
+    def test_definition_voxels_rotation_and_flags(self):
+        catalog = DefinitionCatalog(FIXTURES / "definitions")
+        self.assertEqual(0, catalog.load("02_wedge").flags)
+        vehicle = load_vehicle(FIXTURES / "vehicles" / "rotation_and_shapes.xml")
+        voxels = vehicle.physics_voxels(catalog, 0)
+        self.assertEqual(3, len(voxels))
+        self.assertEqual((5, 6, 7), voxels[0].position)
+        self.assertEqual((5, 5, 7), voxels[1].position)
+        self.assertEqual((9, 8, 7), voxels[2].position)
+        self.assertEqual(1, voxels[2].physics_shape)
+        self.assertEqual("02_wedge", voxels[2].component_definition)
+
+    def test_vehicle_component_bin_definition_is_loaded_from_sibling_package(self):
+        definition_xml = b'''<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Custom Wedge" flags="57"><voxels>
+<voxel flags="1" physics_shape="10"><position z="-1"/>
+<physics_shape_rotation 00="1" 11="1" 22="1"/></voxel>
+</voxels></definition>'''
+        definition_id = b"custom_wedge"
+        body = struct.pack("<I", 1) + definition_id + b"\0" + definition_xml
+        payload = struct.pack("<I", len(body)) + body
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            vehicle = temporary / "Custom Vehicle.xml"
+            vehicle.write_text("<vehicle/>", encoding="utf-8")
+            package = temporary / "Custom Vehicle"
+            package.mkdir()
+            (package / "component.bin").write_bytes(payload)
+            catalog = DefinitionCatalog.for_vehicle(
+                FIXTURES / "definitions", vehicle
+            )
+            definition = catalog.load("custom_wedge")
+            self.assertEqual("vehicle_component_bin", definition.source_format)
+            self.assertEqual(1, len(definition.voxels))
+            self.assertEqual(10, definition.voxels[0].physics_shape)
+            self.assertEqual((0, 0, -1), definition.voxels[0].position)
+
+    def test_legacy_component_bin_uses_filename_hash_as_definition_id(self):
+        definition_xml = b'''<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Legacy Custom"><voxels>
+<voxel flags="1"><position/></voxel>
+</voxels></definition>'''
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            vehicle = temporary / "Legacy.xml"
+            vehicle.write_text("<vehicle/>", encoding="utf-8")
+            package = temporary / "Legacy"
+            package.mkdir()
+            body = definition_xml
+            (package / "abc123.bin").write_bytes(
+                struct.pack("<I", len(body)) + body
+            )
+            definition = DefinitionCatalog.for_vehicle(
+                FIXTURES / "definitions", vehicle
+            ).load("abc123")
+            self.assertEqual("vehicle_component_bin", definition.source_format)
+            self.assertEqual(1, len(definition.voxels))
+
+    def test_vehicle_parser_accepts_stormworks_numeric_matrix_attributes(self):
+        text = '''<?xml version="1.0" encoding="UTF-8"?>
+<vehicle data_version="3"><bodies><body unique_id="7">
+<initial_local_transform 00="1" 11="1" 22="1" 33="1"/>
+<components><c><o><vp x="2"/></o></c></components>
+</body></bodies></vehicle>'''
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "numeric-attributes.xml"
+            path.write_text(text, encoding="utf-8")
+            vehicle = load_vehicle(path)
+            self.assertEqual(1, len(vehicle.bodies))
+            self.assertEqual((2, 0, 0), vehicle.bodies[0].components[0].position)
+
+    def test_definition_surface_collections_are_loaded_separately(self):
+        text = '''<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Surface Fixture"><voxels>
+<voxel flags="1"><position/></voxel>
+</voxels><surfaces>
+<surface orientation="5" rotation="3" shape="2" trans_type="7" flags="9">
+<position x="-1" y="2" z="3"/>
+</surface>
+</surfaces><buoyancy_surfaces>
+<surface orientation="4" rotation="2" shape="1" trans_type="6" flags="8">
+<position x="3" y="2" z="-1"/>
+</surface>
+</buoyancy_surfaces><compartment_sample_pos x="4" y="-2" z="7"/></definition>'''
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "surface_fixture.xml"
+            path.write_text(text, encoding="utf-8")
+            definition = DefinitionCatalog(Path(temporary_directory)).load(
+                "surface_fixture"
+            )
+            self.assertEqual(1, len(definition.surfaces))
+            self.assertEqual(1, len(definition.buoyancy_surfaces))
+            self.assertEqual((4, -2, 7), definition.compartment_sample_position)
+            surface = definition.surfaces[0]
+            self.assertEqual((-1, 2, 3), surface.position)
+            self.assertEqual(
+                (5, 3, 2, 7, 9),
+                (
+                    surface.orientation,
+                    surface.rotation,
+                    surface.shape,
+                    surface.transmission_type,
+                    surface.flags,
+                ),
+            )
+            buoyancy_surface = definition.buoyancy_surfaces[0]
+            self.assertEqual((3, 2, -1), buoyancy_surface.position)
+            self.assertEqual(
+                (4, 2, 1, 6, 8),
+                (
+                    buoyancy_surface.orientation,
+                    buoyancy_surface.rotation,
+                    buoyancy_surface.shape,
+                    buoyancy_surface.transmission_type,
+                    buoyancy_surface.flags,
+                ),
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

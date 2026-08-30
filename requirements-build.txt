@@ -1,0 +1,5 @@
+pyinstaller==6.22.2
+pyinstaller-hooks-contrib==2026.7
+Pillow==11.3.0
+PySide6-Essentials==6.9.3
+PySide6-Addons==6.9.3

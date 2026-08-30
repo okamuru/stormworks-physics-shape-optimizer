@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<vehicle data_version="3">
+  <authors/>
+  <bodies>
+    <body unique_id="101">
+      <components>
+        <c d="custom_two"><o bc="AA0000"><vp y="1"/></o></c>
+        <c d="no_physics"><o sc="9"><vp x="8"/></o></c>
+        <c d="custom_two"><o bc="00AA00"><vp/></o></c>
+        <c d="custom_two"><o r="0,1,0,-1,0,0,0,0,1" bc="0000AA"><vp x="2" y="1"/></o></c>
+      </components>
+    </body>
+    <body unique_id="102">
+      <components>
+        <c><o><vp x="0" y="0" z="0"/></o></c>
+        <c><o><vp x="0" y="2" z="0"/></o></c>
+        <c d="no_physics"><o sc="8"><vp x="8"/></o></c>
+        <c><o><vp x="0" y="1" z="0"/></o></c>
+        <c><o><vp x="0" y="3" z="0"/></o></c>
+        <c><o><vp x="1" y="0" z="0"/></o></c>
+        <c><o><vp x="1" y="2" z="0"/></o></c>
+      </components>
+    </body>
+  </bodies>
+</vehicle>

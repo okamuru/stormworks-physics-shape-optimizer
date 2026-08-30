@@ -1,0 +1,10 @@
+* text=auto
+*.bat text eol=crlf
+*.command text eol=lf
+*.py text eol=lf
+*.qml text eol=lf
+*.json text eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+LICENSES/** -whitespace

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definition name="No Physics Test Component">
+  <voxels>
+    <voxel flags="0" physics_shape="0"><position/></voxel>
+  </voxels>
+</definition>

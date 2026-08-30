@@ -1,0 +1,16 @@
+[package]
+name = "swphysics_native"
+version = "0.1.0"
+edition = "2021"
+authors = ["IrisNuiYaMa_164"]
+license = "GPL-3.0-only"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+panic = "unwind"
+strip = "symbols"

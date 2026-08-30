@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Two Voxel Test Component">
+  <voxels>
+    <voxel flags="1" physics_shape="0"><position x="0" y="0" z="0"/></voxel>
+    <voxel flags="1" physics_shape="0"><position x="1" y="0" z="0"/></voxel>
+    <voxel flags="0" physics_shape="0"><position x="2" y="0" z="0"/></voxel>
+  </voxels>
+</definition>
