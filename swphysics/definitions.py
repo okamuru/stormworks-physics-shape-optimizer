@@ -36,6 +36,25 @@ BASIC_DEFINITION_IDS: Tuple[str, ...] = (
 )
 
 
+# Built-in doors use a dedicated openable-surface path in build 24749959.
+# Their fixed frame voxels carry flag 1; flag-4 panel cells are deliberately
+# absent from the normal Vehicle Physics Shape merge.  When a Physics Flooder
+# is present, the separate door seal grid can make those panel cells part of
+# the generated filled volume.  That grid is not stored in
+# <buoyancy_surfaces> and must be reconstructed from the door_* fields.
+STANDARD_DOOR_COMPONENT_TYPES = frozenset((13, 29, 50, 51))
+_CARDINAL_DOOR_AXES = frozenset(
+    (
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    )
+)
+
+
 def compact_definition_id(component_attributes: dict) -> str:
     """Return the component Definition ID for modern and legacy saves.
 
@@ -117,6 +136,16 @@ class DefinitionSurface:
 
 
 @dataclass(frozen=True)
+class DefinitionDoorSeal:
+    normal: Tuple[int, int, int]
+    side: Tuple[int, int, int]
+    up: Tuple[int, int, int]
+    base_position: Tuple[int, int, int]
+    side_distance: int
+    up_distance: int
+
+
+@dataclass(frozen=True)
 class ComponentDefinition:
     definition_id: str
     name: str
@@ -131,6 +160,7 @@ class ComponentDefinition:
     surfaces: Tuple[DefinitionSurface, ...]
     buoyancy_surfaces: Tuple[DefinitionSurface, ...]
     compartment_sample_position: Tuple[int, int, int]
+    door_seal: Optional[DefinitionDoorSeal] = None
     source_format: str = "xml"
 
     @property
@@ -138,6 +168,48 @@ class ComponentDefinition:
         # build_physics_begin tests definition flags bit 0x400 and requires
         # the loaded mesh-data pointer before pushing one physics_extra_box.
         return bool(self.flags & 0x400) and bool(self.mesh_data_name)
+
+    @property
+    def is_standard_door_component(self) -> bool:
+        return self.component_type in STANDARD_DOOR_COMPONENT_TYPES
+
+    @property
+    def is_custom_door_component(self) -> bool:
+        # door_frame_straight is type 30 with custom_door_type=0, so the
+        # subtype alone cannot identify the complete custom-door family.
+        return self.component_type == 30 or (
+            self.component_type == 7 and self.custom_door_type == 5
+        )
+
+    @property
+    def has_standard_door_seal(self) -> bool:
+        return (
+            self.is_standard_door_component
+            and not self.standard_door_seal_error
+        )
+
+    @property
+    def standard_door_seal_error(self) -> str:
+        if not self.is_standard_door_component:
+            return ""
+        seal = self.door_seal
+        if seal is None:
+            return "door_seal_metadata_missing"
+        if seal.side_distance < 0 or seal.up_distance < 0:
+            return "door_seal_distance_invalid"
+        axes = (seal.normal, seal.side, seal.up)
+        if any(axis not in _CARDINAL_DOOR_AXES for axis in axes):
+            return "door_seal_axis_non_cardinal"
+        if any(
+            sum(left[index] * right[index] for index in range(3)) != 0
+            for left, right in (
+                (seal.normal, seal.side),
+                (seal.normal, seal.up),
+                (seal.side, seal.up),
+            )
+        ):
+            return "door_seal_axes_not_orthogonal"
+        return ""
 
 
 class DefinitionCatalog:
@@ -275,6 +347,32 @@ class DefinitionCatalog:
             if compartment_sample_element is not None
             else {}
         )
+
+        door_normal_element = root.find("door_normal")
+        door_side_element = root.find("door_side")
+        door_up_element = root.find("door_up")
+        door_base_element = root.find("door_base_pos")
+        door_seal = (
+            DefinitionDoorSeal(
+                normal=point_from_attributes(door_normal_element.attrib),
+                side=point_from_attributes(door_side_element.attrib),
+                up=point_from_attributes(door_up_element.attrib),
+                base_position=point_from_attributes(door_base_element.attrib),
+                side_distance=parse_fixed_point_int(
+                    root.attrib.get("door_side_dist", "0")
+                ),
+                up_distance=parse_fixed_point_int(
+                    root.attrib.get("door_up_dist", "0")
+                ),
+            )
+            if (
+                door_normal_element is not None
+                and door_side_element is not None
+                and door_up_element is not None
+                and door_base_element is not None
+            )
+            else None
+        )
         definition = ComponentDefinition(
             definition_id=definition_id,
             name=root.attrib.get("name", definition_id),
@@ -289,6 +387,7 @@ class DefinitionCatalog:
             surfaces=surfaces,
             buoyancy_surfaces=buoyancy_surfaces,
             compartment_sample_position=compartment_sample_position,
+            door_seal=door_seal,
             source_format=source_format,
         )
         self._cache[definition_id] = definition

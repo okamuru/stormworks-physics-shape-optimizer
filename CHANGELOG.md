@@ -1,5 +1,19 @@
 # Changelog
 
+## V1.2.1 Alpha — 2026-09-01
+
+### 日本語
+
+#### 修正
+
+- 標準ドアで閉じられた空間をPhysics Flooderが開放空間として扱い、ゲーム内より多いPhysics Shape数を予測する問題を修正しました。
+
+### English
+
+#### Fixed
+
+- Fixed Physics Flooder treating spaces sealed by built-in doors as open, which could predict more Physics Shapes than the game generates.
+
 ## V1.2.0 Alpha — 2026-09-01
 
 ### 日本語

@@ -242,6 +242,58 @@ class ParserTests(unittest.TestCase):
                 ),
             )
 
+    def test_standard_door_seal_loads_without_static_flag4_panel_physics(self):
+        definition_text = '''<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Door Fixture" type="13" door_side_dist="0" door_up_dist="1"
+ door_lower_limit="-2" door_upper_limit="1" door_flipped="false"><voxels>
+<voxel flags="1"><position x="-1"/></voxel>
+<voxel flags="4"><position y="-1" z="2"/></voxel>
+<voxel flags="4"><position y="0" z="2"/></voxel>
+</voxels>
+<door_size x="0.5" y="2" z="1"/>
+<door_normal x="-1" y="0" z="0"/>
+<door_side x="0" y="0" z="1"/>
+<door_up x="0" y="1" z="0"/>
+<door_base_pos x="0" y="-1" z="2"/>
+</definition>'''
+        vehicle_text = '''<vehicle data_version="3"><bodies><body unique_id="7">
+<components><c d="door_fixture"><o r="1,0,0,0,1,0,0,0,1">
+<vp x="10"/></o></c></components></body></bodies></vehicle>'''
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            (temporary / "door_fixture.xml").write_text(
+                definition_text, encoding="utf-8"
+            )
+            vehicle_path = temporary / "door_vehicle.xml"
+            vehicle_path.write_text(vehicle_text, encoding="utf-8")
+            catalog = DefinitionCatalog(temporary)
+            definition = catalog.load("door_fixture")
+            vehicle = load_vehicle(vehicle_path)
+            component = vehicle.bodies[0].components[0]
+            static_voxels = vehicle.physics_voxels(catalog, 0)
+            door_surfaces = component.closed_standard_door_surfaces(definition)
+
+        self.assertTrue(definition.is_standard_door_component)
+        self.assertTrue(definition.has_standard_door_seal)
+        self.assertIsNotNone(definition.door_seal)
+        self.assertEqual((-1, 0, 0), definition.door_seal.normal)
+        self.assertEqual((0, 0, 1), definition.door_seal.side)
+        self.assertEqual((0, 1, 0), definition.door_seal.up)
+        self.assertEqual((0, -1, 2), definition.door_seal.base_position)
+        self.assertEqual(0, definition.door_seal.side_distance)
+        self.assertEqual(1, definition.door_seal.up_distance)
+        self.assertEqual(((9, 0, 0),), tuple(v.position for v in static_voxels))
+        self.assertEqual(
+            (1, 4, 4),
+            tuple(voxel.flags for voxel in definition.voxels),
+        )
+        self.assertEqual(((0, -1, 2), (0, 0, 2)), tuple(
+            surface.position for surface in door_surfaces
+        ))
+        self.assertEqual((1, 1), tuple(
+            surface.orientation for surface in door_surfaces
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

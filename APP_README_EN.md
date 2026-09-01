@@ -1,4 +1,4 @@
-# Stormworks Physics Shape Optimizer V1.2.0 Alpha
+# Stormworks Physics Shape Optimizer V1.2.1 Alpha
 
 Author: **IrisNuiYaMa_164**
 
@@ -140,7 +140,7 @@ Only the Component order in the optimized copy is changed.
 ## Version Information
 
 - App: Stormworks Physics Shape Optimizer
-- Version: 1.2.0 Alpha
+- Version: 1.2.1 Alpha
 - Author: IrisNuiYaMa_164
 
 ## License and Source Code

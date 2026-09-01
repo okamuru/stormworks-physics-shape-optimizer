@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stormworks-physics-shape-optimizer"
-version = "1.2.0a1"
+version = "1.2.1a1"
 description = "Offline exact Stormworks Physics Shape analysis and optimization"
 authors = [{ name = "IrisNuiYaMa_164" }]
 license = { text = "GPL-3.0-only" }

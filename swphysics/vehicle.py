@@ -33,6 +33,16 @@ MAX_MICROPROCESSOR_WIDTH = 32
 MAX_MICROPROCESSOR_LENGTH = 32
 
 
+_DOOR_SURFACE_ORIENTATION_BY_NORMAL = {
+    (1, 0, 0): 0,
+    (-1, 0, 0): 1,
+    (0, 1, 0): 2,
+    (0, -1, 0): 3,
+    (0, 0, 1): 4,
+    (0, 0, -1): 5,
+}
+
+
 def _validated_microprocessor_cell_count(width: int, length: int) -> int:
     """Bound XML-edited dimensions before expanding dynamic Definition data."""
 
@@ -188,6 +198,39 @@ class ComponentPlacement:
             insertion_index += 1
         return tuple(result)
 
+    def closed_standard_door_surfaces(
+        self, definition: ComponentDefinition
+    ) -> Tuple[DefinitionSurface, ...]:
+        """Return the closed-position openable surface grid for a door.
+
+        Native code walks both distance ranges inclusively.  Each returned
+        Definition surface becomes a primary face at ``p`` and the opposite
+        face at ``p + door_normal`` in the existing surface graph.
+        """
+
+        if not definition.has_standard_door_seal:
+            return ()
+        seal = definition.door_seal
+        assert seal is not None
+        orientation = _DOOR_SURFACE_ORIENTATION_BY_NORMAL[seal.normal]
+        return tuple(
+            DefinitionSurface(
+                position=tuple(
+                    seal.base_position[axis]
+                    + seal.side[axis] * side_step
+                    + seal.up[axis] * up_step
+                    for axis in range(3)
+                ),
+                orientation=orientation,
+                rotation=0,
+                shape=1,
+                transmission_type=0,
+                flags=0,
+            )
+            for side_step in range(seal.side_distance + 1)
+            for up_step in range(seal.up_distance + 1)
+        )
+
     def buoyancy_definition_surfaces(
         self, definition: ComponentDefinition
     ) -> Iterable[DefinitionSurface]:
@@ -200,7 +243,10 @@ class ComponentPlacement:
         """
 
         if definition.component_type != 37:
-            return definition.buoyancy_surfaces
+            return (
+                definition.buoyancy_surfaces
+                + self.closed_standard_door_surfaces(definition)
+            )
         _validated_microprocessor_cell_count(
             self.microprocessor_width, self.microprocessor_length
         )

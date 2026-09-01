@@ -58,7 +58,7 @@ set "QT_QPA_PLATFORM="
 if "%DIST_ONLY%"=="1" goto build_done
 
 if not exist release mkdir release
-set "RELEASE_DIR=release\Stormworks Physics Shape Optimizer 1.2.0 Alpha Windows"
+set "RELEASE_DIR=release\Stormworks Physics Shape Optimizer 1.2.1 Alpha Windows"
 if not exist "%RELEASE_DIR%" mkdir "%RELEASE_DIR%"
 if exist "%RELEASE_DIR%\RELEASE_NOTES*.txt" del /Q "%RELEASE_DIR%\RELEASE_NOTES*.txt"
 copy /Y "dist\StormworksPhysicsShapeOptimizer.exe" "%RELEASE_DIR%\StormworksPhysicsShapeOptimizer.exe" >nul
@@ -69,9 +69,9 @@ copy /Y "THIRD_PARTY_NOTICES.md" "%RELEASE_DIR%\THIRD_PARTY_NOTICES.md" >nul
 copy /Y "SOURCE_CODE.md" "%RELEASE_DIR%\SOURCE_CODE.md" >nul
 if exist "%RELEASE_DIR%\LICENSES" rmdir /S /Q "%RELEASE_DIR%\LICENSES"
 xcopy /E /I /Y "LICENSES" "%RELEASE_DIR%\LICENSES" >nul
-"%BUILD_PYTHON%" -c "import shutil; shutil.make_archive(r'release\Stormworks Physics Shape Optimizer 1.2.0 Alpha Windows', 'zip', root_dir='release', base_dir=r'Stormworks Physics Shape Optimizer 1.2.0 Alpha Windows')"
+"%BUILD_PYTHON%" -c "import shutil; shutil.make_archive(r'release\Stormworks Physics Shape Optimizer 1.2.1 Alpha Windows', 'zip', root_dir='release', base_dir=r'Stormworks Physics Shape Optimizer 1.2.1 Alpha Windows')"
 if errorlevel 1 exit /b 1
-"%BUILD_PYTHON%" -c "from pathlib import Path; import hashlib; p=Path(r'release\Stormworks Physics Shape Optimizer 1.2.0 Alpha Windows.zip'); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
+"%BUILD_PYTHON%" -c "from pathlib import Path; import hashlib; p=Path(r'release\Stormworks Physics Shape Optimizer 1.2.1 Alpha Windows.zip'); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
 if errorlevel 1 exit /b 1
 
 :build_done

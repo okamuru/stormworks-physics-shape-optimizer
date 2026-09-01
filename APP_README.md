@@ -1,4 +1,4 @@
-# Stormworks Physics Shape Optimizer V1.2.0 Alpha
+# Stormworks Physics Shape Optimizer V1.2.1 Alpha
 
 Author: **IrisNuiYaMa_164**
 
@@ -140,7 +140,7 @@ Stormworksのインストール先から `rom/data/definitions` を手動で選�
 ## バージョン情報
 
 - アプリ: Stormworks Physics Shape Optimizer
-- バージョン: 1.2.0 Alpha
+- バージョン: 1.2.1 Alpha
 - 作者: IrisNuiYaMa_164
 
 ## ライセンスとソースコード

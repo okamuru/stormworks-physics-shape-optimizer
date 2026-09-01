@@ -106,7 +106,14 @@ def _build_body_surface_analysis(
             pairs = []
             local_minimum: Optional[List[int]] = None
             local_maximum: Optional[List[int]] = None
-            missing = 0
+            # A standard door without a complete openable-surface record
+            # cannot be treated as an ordinary open hole.  Mark that case
+            # unsupported so callers exclude only the Flooder prediction
+            # instead of inventing a wrong filled volume.  Custom doors keep
+            # the pre-existing Definition-surface path: excluding an entire
+            # Body merely because it contains a custom-door part would be a
+            # large and unrelated optimization regression.
+            missing = int(bool(definition.standard_door_seal_error))
             ignored = 0
             for surface in component.buoyancy_definition_surfaces(definition):
                 resolution = metadata.lookup(transform, surface)

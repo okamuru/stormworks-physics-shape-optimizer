@@ -42,6 +42,52 @@ def _deep_size(value):
 
 
 class AppServiceTests(unittest.TestCase):
+    def test_standard_door_panel_is_not_counted_as_a_vehicle_physics_shape(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            definitions = temporary / "definitions"
+            definitions.mkdir()
+            shutil.copy(
+                FIXTURES / "definitions" / "01_block.xml",
+                definitions / "01_block.xml",
+            )
+            (definitions / "door_fixture.xml").write_text(
+                '''<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Door Fixture" type="13" door_side_dist="0" door_up_dist="2"
+ door_lower_limit="-1" door_upper_limit="1" door_flipped="false"><voxels>
+<voxel flags="1"><position z="-1"/></voxel>
+<voxel flags="4"><position y="-1" z="1"/></voxel>
+<voxel flags="4"><position z="1"/></voxel>
+<voxel flags="4"><position y="1" z="1"/></voxel>
+</voxels>
+<door_size x="0.5" y="2.9" z="0.9"/><door_normal x="1"/>
+<door_side z="1"/><door_up y="1"/><door_base_pos y="-1" z="1"/>
+</definition>''',
+                encoding="utf-8",
+            )
+            source = temporary / "door.xml"
+            source.write_text(
+                '<vehicle data_version="3"><bodies><body unique_id="door">'
+                '<components><c d="door_fixture"><o '
+                'r="1,0,0,0,1,0,0,0,1"><vp/></o></c></components>'
+                '</body></bodies></vehicle>',
+                encoding="utf-8",
+            )
+
+            analysis = analyze_vehicle(
+                source,
+                definitions,
+                max_evaluations=1,
+                worker_count=1,
+            )
+
+        body = analysis.bodies[0]
+        self.assertEqual(0, body.extra_collision_shape_count)
+        self.assertEqual(1, body.physics_voxel_count)
+        self.assertEqual(1, body.current_shape_count)
+        self.assertEqual(1, body.optimized_shape_count)
+        self.assertEqual(1, len(body.current_meshes))
+
     def test_axis_scaled_non_cube_component_is_scored_instead_of_excluded(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary = Path(temporary_directory)
