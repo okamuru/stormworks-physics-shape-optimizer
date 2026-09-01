@@ -1,12 +1,17 @@
 from pathlib import Path
+import platform
 import random
 import unittest
 
+from swphysics.binary_oracle import DEFAULT_BINARY, Uc, BinaryPartitionOracle
 from swphysics.definitions import DefinitionCatalog
 from swphysics.model import IDENTITY_MATRIX, WorldVoxel
+from swphysics.native_merge import native_backend_available
 from swphysics.platform_paths import find_definition_directory
 from swphysics.portable_merge import (
     DIRECTIONS,
+    PortableMergeGroup,
+    PortableMergeResult,
     PortableMergeOracle,
     PreparedPortableMergeEvaluator,
     _layer_positions,
@@ -37,7 +42,7 @@ def voxel(index, position, shape, rotation=IDENTITY_MATRIX):
 
 
 class PortableMergeTests(unittest.TestCase):
-    def test_overlap_preview_retains_every_source_seed(self):
+    def test_overlap_seed_consumes_latest_lookup_winner(self):
         voxels = (
             voxel(0, (0, 0, 0), 0),
             voxel(1, (0, 0, 0), 0),
@@ -45,11 +50,303 @@ class PortableMergeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "overlapping physics voxel"):
             partition_portable_exact(voxels)
         result = partition_portable_exact(voxels, allow_overlaps=True)
-        self.assertEqual(2, result.shape_count)
+        self.assertEqual(1, result.shape_count)
+        self.assertEqual(
+            ((0, 1),),
+            tuple(group.voxel_insertion_indices for group in result.groups),
+        )
+
+    def test_overlap_uses_seed_plane_and_leaves_middle_duplicates_as_seeds(self):
+        cube_then_wedge = partition_portable_exact(
+            (
+                voxel(0, (0, 0, 0), 0),
+                voxel(1, (0, 0, 0), 1),
+            ),
+            allow_overlaps=True,
+        )
+        wedge_then_cube = partition_portable_exact(
+            (
+                voxel(0, (0, 0, 0), 1),
+                voxel(1, (0, 0, 0), 0),
+            ),
+            allow_overlaps=True,
+        )
+        triple = partition_portable_exact(
+            tuple(voxel(index, (0, 0, 0), 0) for index in range(3)),
+            allow_overlaps=True,
+        )
+
+        self.assertEqual((), cube_then_wedge.groups[0].planes)
+        self.assertEqual(
+            (voxel_clip_plane(voxel(0, (0, 0, 0), 1)),),
+            wedge_then_cube.groups[0].planes,
+        )
+        self.assertEqual(
+            ((0, 2), (1,)),
+            tuple(group.voxel_insertion_indices for group in triple.groups),
+        )
+
+    def test_overlap_seed_plane_can_reject_the_merged_convex_hull(self):
+        result = partition_portable_exact(
+            (
+                voxel(0, (0, 0, 0), 21),
+                voxel(1, (0, 0, 0), 10),
+            ),
+            allow_overlaps=True,
+        )
+
+        self.assertEqual(1, result.merge_group_count)
+        self.assertEqual(0, result.shape_count)
+        self.assertEqual(1, result.rejected_convex_group_count)
+
+    def test_overlap_winner_outside_seed_plane_remains_a_separate_seed(self):
+        zero_matrix = (0,) * 9
+        result = partition_portable_exact(
+            (
+                voxel(0, (0, 0, 0), 1, zero_matrix),
+                voxel(1, (0, 0, 0), 0, zero_matrix),
+            ),
+            allow_overlaps=True,
+        )
+
         self.assertEqual(
             ((0,), (1,)),
             tuple(group.voxel_insertion_indices for group in result.groups),
         )
+        self.assertEqual(1, result.shape_count)
+        self.assertEqual(1, result.rejected_convex_group_count)
+
+    def test_xml_scale_clip_plane_matches_native_integer_truncation(self):
+        scaled = voxel(
+            0,
+            (-2, 1, 0),
+            4,
+            (1, 0, 0, 0, 3, 0, 0, 0, 3),
+        )
+
+        self.assertEqual(
+            ((-2, 0, -4), (0, 6, -3)),
+            voxel_clip_plane(scaled),
+        )
+
+    def test_even_xml_scale_half_grid_anchor_truncates_toward_zero(self):
+        scaled = voxel(
+            0,
+            (0, 0, 0),
+            1,
+            (1, 0, 0, 0, -2, 0, 0, 0, 1),
+        )
+
+        self.assertEqual(((0, 1, 0), (0, -2, -1)), voxel_clip_plane(scaled))
+
+    def test_shear_and_singular_clip_planes_match_native_goldens(self):
+        sheared = voxel(
+            0,
+            (0, 0, 0),
+            1,
+            (0, 0, -3, -1, 0, 0, 0, -3, 4),
+        )
+        singular = voxel(
+            1,
+            (0, 0, 0),
+            1,
+            (0, 0, 0, 0, 0, 0, -1, 0, 0),
+        )
+
+        self.assertEqual(((1, 2, 0), (-1, 3, -4)), voxel_clip_plane(sheared))
+        self.assertEqual(((1, 0, 0), (1, 0, 0)), voxel_clip_plane(singular))
+        for item in (sheared, singular):
+            result = partition_portable_exact((item,))
+            self.assertEqual(1, result.merge_group_count)
+            self.assertEqual(1, result.shape_count)
+
+    def test_xml_scaled_wedge_finalization_rejects_degenerate_second_voxel(self):
+        rotation = (1, 0, 0, 0, 3, 0, 0, 0, 3)
+        voxels = (
+            voxel(0, (-2, 1, 0), 4, rotation),
+            voxel(1, (-2, 1, -3), 5, rotation),
+        )
+
+        result = partition_portable_exact(voxels)
+
+        self.assertEqual(2, result.merge_group_count)
+        self.assertEqual(1, result.shape_count)
+        self.assertEqual(1, result.rejected_convex_group_count)
+        self.assertEqual(
+            ((8, True), (0, False)),
+            tuple(
+                (group.finalization_vertex_count, group.contributes_f2_shape)
+                for group in result.groups
+            ),
+        )
+
+    def test_finalized_groups_omit_convex_hulls_with_fewer_than_four_vertices(self):
+        valid = PortableMergeGroup(
+            seed_insertion_index=0,
+            voxel_insertion_indices=(0,),
+            component_indices=(0,),
+            minimum=(-2, 1, 0),
+            maximum=(-2, 1, 0),
+            planes=(((-2, 0, -4), (0, 6, -3)),),
+            seed_physics_shape=4,
+        )
+        rejected = PortableMergeGroup(
+            seed_insertion_index=1,
+            voxel_insertion_indices=(1,),
+            component_indices=(0,),
+            minimum=(-2, 1, -3),
+            maximum=(-2, 1, -3),
+            planes=(((-2, 0, -4), (0, 6, -3)),),
+            seed_physics_shape=5,
+        )
+
+        result = PortableMergeResult((valid, rejected), 2)
+
+        self.assertEqual((valid,), result.finalized_groups)
+        self.assertEqual(1, result.shape_count)
+
+    def test_prepared_xml_scaled_score_uses_finalized_shape_count(self):
+        rotation = (1, 0, 0, 0, 3, 0, 0, 0, 3)
+        prepared = PreparedPortableMergeEvaluator(
+            (
+                (
+                    voxel(0, (-2, 1, 0), 4, rotation),
+                    voxel(0, (-2, 1, -3), 5, rotation),
+                ),
+            )
+        )
+
+        self.assertEqual(
+            "rust_cdylib" if native_backend_available() else "python",
+            prepared.native_backend,
+        )
+        self.assertEqual(1, prepared.shape_count_order((0,)))
+        self.assertEqual(1, prepared.partition_order((0,)).shape_count)
+
+    def test_existing_plane_crossing_does_not_reject_scaled_wedge_layer(self):
+        rotation = (1, 0, 0, 0, 1, 0, 0, 0, -3)
+        result = partition_portable_exact(
+            (
+                voxel(0, (0, 0, 0), 21, rotation),
+                voxel(1, (1, 0, 0), 19, rotation),
+            )
+        )
+
+        self.assertEqual(1, result.merge_group_count)
+        self.assertEqual((0, 1), result.groups[0].voxel_insertion_indices)
+
+    @unittest.skipUnless(
+        platform.machine() == "x86_64"
+        and Uc is not None
+        and DEFAULT_BINARY.is_file(),
+        "x86 Unicorn and the installed build are required",
+    )
+    def test_xml_scaled_finalization_matches_installed_binary(self):
+        rotation = (1, 0, 0, 0, 3, 0, 0, 0, 3)
+        voxels = (
+            voxel(0, (-2, 1, 0), 4, rotation),
+            voxel(1, (-2, 1, -3), 5, rotation),
+        )
+
+        native = BinaryPartitionOracle().finalize(voxels)
+        portable = partition_portable_exact(voxels)
+
+        self.assertEqual((2, 1, 1), (
+            native.merge_group_count,
+            native.shape_count,
+            native.rejected_convex_group_count,
+        ))
+        self.assertEqual(native.merge_group_count, portable.merge_group_count)
+        self.assertEqual(native.shape_count, portable.shape_count)
+        self.assertEqual(
+            native.rejected_convex_group_count,
+            portable.rejected_convex_group_count,
+        )
+
+    @unittest.skipUnless(
+        platform.machine() == "x86_64"
+        and Uc is not None
+        and DEFAULT_BINARY.is_file(),
+        "x86 Unicorn and the installed build are required",
+    )
+    def test_overlapping_position_goldens_match_installed_binary(self):
+        cases = (
+            (
+                "cube_cube",
+                (voxel(0, (0, 0, 0), 0), voxel(1, (0, 0, 0), 0)),
+                ((0, 1),),
+                1,
+                ((0, "box"),),
+            ),
+            (
+                "cube_wedge",
+                (voxel(0, (0, 0, 0), 0), voxel(1, (0, 0, 0), 1)),
+                ((0, 1),),
+                1,
+                ((0, "box"),),
+            ),
+            (
+                "wedge_cube",
+                (voxel(0, (0, 0, 0), 1), voxel(1, (0, 0, 0), 0)),
+                ((0, 1),),
+                1,
+                ((1, "convex_hull"),),
+            ),
+            (
+                "triple_cube",
+                tuple(voxel(index, (0, 0, 0), 0) for index in range(3)),
+                ((0, 2), (1,)),
+                2,
+                ((0, "box"), (0, "box")),
+            ),
+            (
+                "rejected_wedge_pair",
+                (voxel(0, (0, 0, 0), 21), voxel(1, (0, 0, 0), 10)),
+                ((0, 1),),
+                0,
+                ((1, "rejected_convex"),),
+            ),
+            (
+                "outside_zero_normal_seed",
+                (
+                    voxel(0, (0, 0, 0), 1, (0,) * 9),
+                    voxel(1, (0, 0, 0), 0, (0,) * 9),
+                ),
+                ((0,), (1,)),
+                1,
+                ((1, "rejected_convex"), (0, "box")),
+            ),
+        )
+        oracle = BinaryPartitionOracle()
+        for name, voxels, expected_groups, expected_count, expected_final in cases:
+            with self.subTest(name=name):
+                native = oracle.finalize(voxels)
+                portable = partition_portable_exact(
+                    voxels,
+                    allow_overlaps=True,
+                )
+
+                self.assertEqual(
+                    expected_groups,
+                    tuple(group.voxel_insertion_indices for group in native.groups),
+                )
+                self.assertEqual(
+                    expected_groups,
+                    tuple(group.voxel_insertion_indices for group in portable.groups),
+                )
+                self.assertEqual(expected_count, native.shape_count)
+                self.assertEqual(expected_count, portable.shape_count)
+                self.assertEqual(
+                    expected_final,
+                    tuple(
+                        (shape.custom_plane_count, shape.representation)
+                        for shape in native.finalized_shapes
+                    ),
+                )
+                self.assertEqual(
+                    tuple(item[0] for item in expected_final),
+                    tuple(len(group.planes) for group in portable.groups),
+                )
 
     def test_cube_order_a_and_b_match_confirmed_counts(self):
         catalog = DefinitionCatalog(FIXTURES / "definitions")
@@ -151,10 +448,26 @@ class PortableMergeTests(unittest.TestCase):
         prepared = PreparedPortableMergeEvaluator(groups, allow_overlaps=True)
         forward = prepared.partition_order((0, 1))
         reverse = prepared.partition_order((1, 0))
-        self.assertEqual(2, forward.shape_count)
-        self.assertEqual(2, reverse.shape_count)
-        self.assertEqual((0, 1), tuple(group.seed_insertion_index for group in forward.groups))
-        self.assertEqual((0, 1), tuple(group.seed_insertion_index for group in reverse.groups))
+        self.assertEqual(1, forward.shape_count)
+        self.assertEqual(1, reverse.shape_count)
+        self.assertEqual((0,), tuple(group.seed_insertion_index for group in forward.groups))
+        self.assertEqual((0,), tuple(group.seed_insertion_index for group in reverse.groups))
+        self.assertEqual((0, 1), forward.groups[0].voxel_insertion_indices)
+        self.assertEqual((0, 1), reverse.groups[0].voxel_insertion_indices)
+
+    def test_prepared_overlap_order_changes_the_native_seed_plane(self):
+        prepared = PreparedPortableMergeEvaluator(
+            (
+                (voxel(0, (0, 0, 0), 21),),
+                (voxel(1, (0, 0, 0), 10),),
+            ),
+            allow_overlaps=True,
+        )
+
+        self.assertEqual(0, prepared.partition_order((0, 1)).shape_count)
+        self.assertEqual(1, prepared.partition_order((1, 0)).shape_count)
+        self.assertEqual(0, prepared.shape_count_order((0, 1)))
+        self.assertEqual(1, prepared.shape_count_order((1, 0)))
 
     def test_prepared_overlap_lookup_matches_direct_latest_winner(self):
         groups = (

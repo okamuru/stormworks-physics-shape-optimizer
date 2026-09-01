@@ -14,7 +14,12 @@ from swphysics.gpu_viewer import (
     legacy_view_orientation,
 )
 from swphysics.partition import Box
-from swphysics.viewer import box_mesh, preview_frame, rotate_point
+from swphysics.viewer import (
+    box_mesh,
+    preview_frame,
+    rotate_point,
+    stormworks_preview_mesh,
+)
 
 
 class GpuGeometryTests(unittest.TestCase):
@@ -53,6 +58,34 @@ class GpuGeometryTests(unittest.TestCase):
                 0.0,
             )
             self.assertEqual((1.0, 1.0, 1.0), (first[6], second[6], third[6]))
+
+    def test_axis_reflected_preview_keeps_gpu_triangles_outward(self):
+        preview = stormworks_preview_mesh(
+            box_mesh(Box((3, 0, 5), (3, 0, 5)))
+        )
+        geometry = build_gpu_geometry((preview,))
+        vertices = tuple(
+            struct.unpack_from("<7f", geometry.vertex_data, offset)
+            for offset in range(0, len(geometry.vertex_data), GPU_VERTEX_STRIDE)
+        )
+
+        for offset in range(0, len(vertices), 3):
+            first, second, third = vertices[offset : offset + 3]
+            left = tuple(second[axis] - first[axis] for axis in range(3))
+            right = tuple(third[axis] - first[axis] for axis in range(3))
+            normal = (
+                left[1] * right[2] - left[2] * right[1],
+                left[2] * right[0] - left[0] * right[2],
+                left[0] * right[1] - left[1] * right[0],
+            )
+            triangle_center = tuple(
+                (first[axis] + second[axis] + third[axis]) / 3.0
+                for axis in range(3)
+            )
+            self.assertGreater(
+                sum(normal[axis] * triangle_center[axis] for axis in range(3)),
+                0.0,
+            )
 
     def test_cube_outline_deduplicates_its_twelve_edges(self):
         meshes = (box_mesh(Box((0, 0, 0), (0, 0, 0))),)

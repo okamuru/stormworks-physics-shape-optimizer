@@ -119,6 +119,23 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(1, voxels[2].physics_shape)
         self.assertEqual("02_wedge", voxels[2].component_definition)
 
+    def test_xml_scale_expands_spacing_between_definition_voxels(self):
+        text = '''<vehicle data_version="3"><bodies><body><components>
+<c d="custom_two"><o r="3,0,0,0,1,0,0,0,1"><vp x="10"/></o></c>
+</components></body></bodies></vehicle>'''
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "scaled_spacing.xml"
+            path.write_text(text, encoding="utf-8")
+            vehicle = load_vehicle(path)
+            voxels = vehicle.physics_voxels(
+                DefinitionCatalog(FIXTURES / "definitions"), 0
+            )
+
+        self.assertEqual(((10, 0, 0), (13, 0, 0)), tuple(
+            voxel.position for voxel in voxels
+        ))
+        self.assertEqual(3, voxels[1].position[0] - voxels[0].position[0])
+
     def test_vehicle_component_bin_definition_is_loaded_from_sibling_package(self):
         definition_xml = b'''<?xml version="1.0" encoding="UTF-8"?>
 <definition name="Custom Wedge" flags="57"><voxels>

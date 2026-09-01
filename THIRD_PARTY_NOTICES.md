@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Stormworks Physics Shape Optimizer V1.1.0 Alpha is distributed under the
+Stormworks Physics Shape Optimizer V1.2.0 Alpha is distributed under the
 GNU General Public License version 3. See `LICENSE`.
 
 The release binaries include or are built with the following third-party

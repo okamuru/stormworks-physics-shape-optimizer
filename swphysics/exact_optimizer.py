@@ -396,22 +396,44 @@ def overlapping_component_indices(
 
 
 def _candidate_move_pairs_with_barriers(
-    length: int, fixed_indices: Sequence[int]
+    length: int,
+    fixed_indices: Sequence[int],
+    barrier_offsets: Sequence[int] = (),
 ) -> Sequence[Tuple[int, int]]:
-    """Return moves that never cross a fixed overlap component."""
+    """Return moves that never cross fixed Components or omitted barriers.
+
+    A fixed index is an included Component which cannot move.  A barrier
+    offset is a split *between* included Components; it represents an omitted
+    physics Component whose placement is not modelled and therefore must not
+    be crossed by otherwise supported Components.
+    """
 
     fixed = tuple(sorted(set(fixed_indices)))
     if any(index < 0 or index >= length for index in fixed):
         raise ValueError("fixed component index is out of range")
-    if not fixed:
+    barriers = tuple(sorted(set(barrier_offsets)))
+    if any(offset < 0 or offset > length for offset in barriers):
+        raise ValueError("component barrier offset is out of range")
+    if not fixed and not barriers:
         return _candidate_move_pairs(length)
     segments = []
     start = 0
-    for stop in fixed + (length,):
-        segment_pairs = _MovePairSequence(stop - start)
-        if segment_pairs:
-            segments.append((start, segment_pairs))
-        start = stop + 1
+    fixed_set = set(fixed)
+    barrier_set = set(barriers)
+    for index in range(length):
+        if index in barrier_set:
+            segment_pairs = _MovePairSequence(index - start)
+            if segment_pairs:
+                segments.append((start, segment_pairs))
+            start = index
+        if index in fixed_set:
+            segment_pairs = _MovePairSequence(index - start)
+            if segment_pairs:
+                segments.append((start, segment_pairs))
+            start = index + 1
+    segment_pairs = _MovePairSequence(length - start)
+    if segment_pairs:
+        segments.append((start, segment_pairs))
     return _OffsetMovePairSequence(segments)
 
 
@@ -489,6 +511,7 @@ def _native_seed_sweep_candidates(
     fixed_indices: Sequence[int],
     seen: set[Tuple[int, ...]],
     limit: int,
+    barrier_offsets: Sequence[int] = (),
 ) -> Tuple[Tuple[int, ...], ...]:
     """Build spatial seed orders around Stormworks' six-direction merge walk.
 
@@ -505,12 +528,24 @@ def _native_seed_sweep_candidates(
     groups = tuple(tuple(group) for group in component_voxels)
     length = len(groups)
     fixed = tuple(sorted(set(fixed_indices)))
+    barriers = tuple(sorted(set(barrier_offsets)))
+    if any(offset < 0 or offset > length for offset in barriers):
+        raise ValueError("component barrier offset is out of range")
     segments = []
     start = 0
-    for stop in fixed + (length,):
-        if start < stop:
-            segments.append(tuple(range(start, stop)))
-        start = stop + 1
+    fixed_set = set(fixed)
+    barrier_set = set(barriers)
+    for index in range(length):
+        if index in barrier_set:
+            if start < index:
+                segments.append(tuple(range(start, index)))
+            start = index
+        if index in fixed_set:
+            if start < index:
+                segments.append(tuple(range(start, index)))
+            start = index + 1
+    if start < length:
+        segments.append(tuple(range(start, length)))
 
     # A sweep key only depends on the component's bounding extrema.  The old
     # implementation recomputed three ``min(...)`` expressions over every
@@ -654,6 +689,7 @@ def optimize_exact_component_order(
     trailing_voxels: Sequence[WorldVoxel] = (),
     search_backend: str = "binary_exact",
     fixed_component_indices: Sequence[int] = (),
+    component_barrier_offsets: Sequence[int] = (),
     progress_callback: Optional[Callable[[int, int], None]] = None,
     detailed_progress_callback: Optional[Callable[[int, int, int], None]] = None,
     worker_count: int = 1,
@@ -807,8 +843,21 @@ def optimize_exact_component_order(
 
     evaluate(original_order)
     before = before_result
-    reached_lower_bound = before.shape_count <= 1
-    if not reached_lower_bound and before.shape_count <= 128:
+    # A clipped non-cube merge group can be rejected during the game's final
+    # convex-hull build and therefore contribute zero F2 Shapes.  Occupancy is
+    # only a hard lower bound for cube-only input; using it for wedges can hide
+    # a real 1 -> 0 (or N -> fewer) ordering improvement.
+    has_non_cube = any(
+        voxel.physics_shape != 0
+        for group in groups
+        for voxel in group
+    ) or any(voxel.physics_shape != 0 for voxel in trailing)
+    reached_lower_bound = before.shape_count == 0 or len(groups) <= 1
+    if (
+        not reached_lower_bound
+        and not has_non_cube
+        and before.shape_count <= 128
+    ):
         reached_lower_bound = before.shape_count == _occupancy_component_lower_bound(
             groups,
             trailing,
@@ -834,8 +883,11 @@ def optimize_exact_component_order(
     active = (original_order,)
     seen = {original_order}
     fixed = tuple(sorted(set(fixed_component_indices)))
+    barrier_offsets = tuple(sorted(set(component_barrier_offsets)))
     bounded_candidates = len(original_order) > _BOUNDED_CANDIDATE_THRESHOLD
-    move_pairs = _candidate_move_pairs_with_barriers(len(original_order), fixed)
+    move_pairs = _candidate_move_pairs_with_barriers(
+        len(original_order), fixed, barrier_offsets
+    )
     for _round in range(search_rounds):
         candidates = set(active)
         remaining_budget = evaluation_budget - evaluated_count
@@ -848,6 +900,7 @@ def optimize_exact_component_order(
                     fixed,
                     seen,
                     remaining_budget,
+                    barrier_offsets,
                 )
             )
         elif bounded_candidates:
@@ -955,6 +1008,7 @@ def optimize_staged_component_order(
     trailing_voxels: Sequence[WorldVoxel] = (),
     search_backend: str = "binary_exact",
     fixed_component_indices: Sequence[int] = (),
+    component_barrier_offsets: Sequence[int] = (),
     progress_callback: Optional[
         Callable[[int, int, int, int, int, int], None]
     ] = None,
@@ -1015,6 +1069,7 @@ def optimize_staged_component_order(
             trailing_voxels=trailing_voxels,
             search_backend=search_backend,
             fixed_component_indices=fixed_component_indices,
+            component_barrier_offsets=component_barrier_offsets,
             detailed_progress_callback=report_stage,
             worker_count=resolved_workers,
         )

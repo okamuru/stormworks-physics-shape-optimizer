@@ -3262,7 +3262,7 @@ def apply_style(application: QApplication) -> None:
 
 
 def self_test() -> int:
-    from .definitions import ComponentDefinition
+    from .definitions import ComponentDefinition, DefinitionSurface
     from .model import IDENTITY_MATRIX
     from .native_merge import native_backend_available, native_backend_status
     from .non_cube_data import NON_CUBE_CLIP_PLANES
@@ -3289,6 +3289,19 @@ def self_test() -> int:
         raise RuntimeError("bundled surface metadata binary hash mismatch")
     if set(NON_CUBE_CLIP_PLANES) != set(range(1, 42)):
         raise RuntimeError("portable non-cube plane table is incomplete")
+    xml_surface = metadata.lookup(
+        (2, 0, 0, 0, 3, 0, 0, 0, 4),
+        DefinitionSurface(
+            position=(0, 0, 0),
+            orientation=0,
+            rotation=0,
+            shape=1,
+            transmission_type=0,
+            flags=1,
+        ),
+    )
+    if xml_surface is None or xml_surface.type_count != 1:
+        raise RuntimeError("XML buoyancy surface quantization failed")
     microprocessor_definition = ComponentDefinition(
         definition_id="microprocessor",
         name="Microprocessor",
@@ -3348,6 +3361,7 @@ def self_test() -> int:
                 "physics_shape_ids": "0..41",
                 "surface_type_count": len(metadata.types),
                 "surface_transform_count": 48,
+                "xml_surface_transform_model": "native_integer_quantization",
                 "microprocessor_physics_voxel_count": len(dynamic_voxels),
                 "microprocessor_bottom_surface_count": len(dynamic_surfaces),
                 "definitions_detected": str(detected) if detected else None,
@@ -3499,8 +3513,8 @@ def gpu_self_test() -> int:
     preview_center_z = sum(
         vertex[2] for vertex in viewer.meshes[0].vertices
     ) / len(viewer.meshes[0].vertices)
-    if abs(preview_center_x + 3.0) > 1e-7 or abs(preview_center_z + 5.0) > 1e-7:
-        raise RuntimeError("Stormworks preview Y-axis rotation was not applied")
+    if abs(preview_center_x + 3.0) > 1e-7 or abs(preview_center_z - 5.0) > 1e-7:
+        raise RuntimeError("Stormworks preview axis conversion was not applied")
     viewer.show()
     loop = QEventLoop()
     QTimer.singleShot(750, loop.quit)

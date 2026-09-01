@@ -42,6 +42,46 @@ def _deep_size(value):
 
 
 class AppServiceTests(unittest.TestCase):
+    def test_axis_scaled_non_cube_component_is_scored_instead_of_excluded(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            definitions = temporary / "definitions"
+            definitions.mkdir()
+            shutil.copy(
+                FIXTURES / "definitions" / "01_block.xml",
+                definitions / "01_block.xml",
+            )
+            (definitions / "scaled_pair.xml").write_text(
+                """<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Scaled pair"><voxels>
+<voxel flags="1" physics_shape="4"><position/><physics_shape_rotation 00="1" 01="0" 02="0" 10="0" 11="1" 12="0" 20="0" 21="0" 22="1"/></voxel>
+<voxel flags="1" physics_shape="5"><position z="-1"/><physics_shape_rotation 00="1" 01="0" 02="0" 10="0" 11="1" 12="0" 20="0" 21="0" 22="1"/></voxel>
+</voxels></definition>""",
+                encoding="utf-8",
+            )
+            source = temporary / "scaled.xml"
+            source.write_text(
+                '<vehicle data_version="3"><bodies><body><components>'
+                '<c d="scaled_pair"><o r="1,0,0,0,3,0,0,0,3">'
+                '<vp x="-2" y="1"/></o></c>'
+                '</components></body></bodies></vehicle>',
+                encoding="utf-8",
+            )
+
+            analysis = analyze_vehicle(
+                source,
+                definitions,
+                max_evaluations=1,
+                worker_count=1,
+            )
+
+        body = analysis.bodies[0]
+        self.assertTrue(body.can_optimize)
+        self.assertEqual(0, body.xml_edited_component_count)
+        self.assertEqual(2, body.physics_voxel_count)
+        self.assertEqual(1, body.current_shape_count)
+        self.assertEqual(1, body.optimized_shape_count)
+
     def test_omitted_rotation_wedge_row_is_one_preview_shape(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             source = Path(temporary_directory) / "logic.xml"
@@ -309,6 +349,16 @@ class AppServiceTests(unittest.TestCase):
     def test_unpredicted_non_cube_is_fixed_while_supported_components_optimize(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary = Path(temporary_directory)
+            definitions = temporary / "definitions"
+            shutil.copytree(FIXTURES / "definitions", definitions)
+            (definitions / "custom_unknown_shape.xml").write_text(
+                '''<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Unknown Physics Shape"><voxels>
+  <voxel flags="1" physics_shape="99"><position/></voxel>
+</voxels></definition>
+''',
+                encoding="utf-8",
+            )
             source = temporary / "mixed_xml_edited.xml"
             output = temporary / "optimized.xml"
             source.write_text(
@@ -321,14 +371,14 @@ class AppServiceTests(unittest.TestCase):
   <c><o><vp x="1"/></o></c>
   <c><o><vp x="1" y="2"/></o></c>
 </components></body><body unique_id="26"><components>
-  <c d="02_wedge"><o r="-3,0,0,1,3,0,0,0,-2"><vp x="99"/></o></c>
+  <c d="custom_unknown_shape"><o r="-3,0,0,1,3,0,0,0,-2"><vp x="99"/></o></c>
   <c><o><vp x="100"/></o></c>
 </components></body></bodies></vehicle>
 ''',
                 encoding="utf-8",
             )
 
-            analysis = analyze_vehicle(source, FIXTURES / "definitions")
+            analysis = analyze_vehicle(source, definitions)
             self.assertTrue(analysis.can_optimize)
             self.assertEqual(1, analysis.xml_edited_component_count)
             self.assertEqual(0, analysis.protected_body_count)
@@ -364,9 +414,19 @@ class AppServiceTests(unittest.TestCase):
                 output_bytes[output_start:output_end],
             )
 
-    def test_unpredicted_component_keeps_its_slot_while_same_body_is_reordered(self):
+    def test_unpredicted_component_is_a_true_ordering_barrier(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary = Path(temporary_directory)
+            definitions = temporary / "definitions"
+            shutil.copytree(FIXTURES / "definitions", definitions)
+            (definitions / "custom_unknown_shape.xml").write_text(
+                '''<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Unknown Physics Shape"><voxels>
+  <voxel flags="1" physics_shape="99"><position/></voxel>
+</voxels></definition>
+''',
+                encoding="utf-8",
+            )
             source = temporary / "partial_body.xml"
             output = temporary / "optimized.xml"
             source.write_text(
@@ -374,7 +434,7 @@ class AppServiceTests(unittest.TestCase):
 <vehicle data_version="3"><authors/><bodies><body unique_id="partial"><components>
   <c><o><vp/></o></c>
   <c><o><vp y="2"/></o></c>
-  <c d="02_wedge" custom_marker="keep-me"><o r="-3,0,0,1,3,0,0,0,-2"><vp x="99"/></o></c>
+  <c d="custom_unknown_shape" custom_marker="keep-me"><o r="-3,0,0,1,3,0,0,0,-2"><vp x="99"/></o></c>
   <c><o><vp y="1"/></o></c>
   <c><o><vp y="3"/></o></c>
   <c><o><vp x="1"/></o></c>
@@ -384,23 +444,23 @@ class AppServiceTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            analysis = analyze_vehicle(source, FIXTURES / "definitions")
+            analysis = analyze_vehicle(source, definitions)
             body = analysis.bodies[0]
             order = body.optimization_result.optimized_component_order
 
             self.assertTrue(analysis.can_optimize)
             self.assertEqual(4, analysis.current_shape_count)
-            self.assertEqual(3, analysis.optimized_shape_count)
+            self.assertEqual(4, analysis.optimized_shape_count)
             self.assertEqual(2, order[2])
-            self.assertNotEqual(tuple(range(7)), order)
+            self.assertEqual({0, 1}, set(order[:2]))
+            self.assertEqual({3, 4, 5, 6}, set(order[3:]))
 
             save_analyzed_vehicle_copy(analysis, output)
             before = load_vehicle(source).bodies[0]
             after = load_vehicle(output).bodies[0]
             self.assertEqual(before.components[2], after.components[2])
-            self.assertNotEqual(before.components, after.components)
             excluded_bytes = (
-                b'<c d="02_wedge" custom_marker="keep-me"><o '
+                b'<c d="custom_unknown_shape" custom_marker="keep-me"><o '
                 b'r="-3,0,0,1,3,0,0,0,-2"><vp x="99"/></o></c>'
             )
             self.assertIn(excluded_bytes, output.read_bytes())
@@ -423,12 +483,12 @@ class AppServiceTests(unittest.TestCase):
 <definition name="XML Edited Surface">
   <voxels><voxel flags="1" physics_shape="0"><position/></voxel></voxels>
   <buoyancy_surfaces>
-    <surface orientation="0" rotation="0" shape="1" flags="1"><position/></surface>
-    <surface orientation="1" rotation="0" shape="1" flags="1"><position/></surface>
-    <surface orientation="2" rotation="0" shape="1" flags="1"><position/></surface>
-    <surface orientation="3" rotation="0" shape="1" flags="1"><position/></surface>
-    <surface orientation="4" rotation="0" shape="1" flags="1"><position/></surface>
-    <surface orientation="5" rotation="0" shape="1" flags="1"><position/></surface>
+    <surface orientation="0" rotation="0" shape="99" flags="1"><position/></surface>
+    <surface orientation="1" rotation="0" shape="99" flags="1"><position/></surface>
+    <surface orientation="2" rotation="0" shape="99" flags="1"><position/></surface>
+    <surface orientation="3" rotation="0" shape="99" flags="1"><position/></surface>
+    <surface orientation="4" rotation="0" shape="99" flags="1"><position/></surface>
+    <surface orientation="5" rotation="0" shape="99" flags="1"><position/></surface>
   </buoyancy_surfaces>
 </definition>
 ''',
@@ -519,7 +579,7 @@ class AppServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "native 32x32 limit"):
                 load_vehicle(source)
 
-    def test_non_grid_non_cube_is_excluded_even_when_clip_anchor_is_integral(self):
+    def test_general_integer_transform_is_optimized_when_clip_anchor_is_integral(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             source = Path(temporary_directory) / "integral_anchor_edit.xml"
             source.write_text(
@@ -535,13 +595,13 @@ class AppServiceTests(unittest.TestCase):
 
             self.assertTrue(analysis.can_optimize)
             self.assertEqual(0, analysis.protected_body_count)
-            self.assertEqual(1, analysis.partially_optimized_body_count)
-            self.assertEqual(1, analysis.xml_edited_component_count)
+            self.assertEqual(0, analysis.partially_optimized_body_count)
+            self.assertEqual(0, analysis.xml_edited_component_count)
             self.assertFalse(analysis.bodies[0].protected_body)
             self.assertGreater(analysis.bodies[0].evaluated_order_count, 0)
             self.assertEqual((0,), analysis.bodies[0].optimization_result.optimized_component_order)
 
-    def test_non_grid_non_cube_rotation_from_definition_excludes_component(self):
+    def test_general_integer_rotation_from_definition_is_optimized(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary = Path(temporary_directory)
             definitions = temporary / "definitions"
@@ -569,9 +629,80 @@ class AppServiceTests(unittest.TestCase):
             analysis = analyze_vehicle(source, definitions)
 
             self.assertEqual(0, analysis.protected_body_count)
-            self.assertEqual(1, analysis.partially_optimized_body_count)
-            self.assertEqual(1, analysis.xml_edited_component_count)
+            self.assertEqual(0, analysis.partially_optimized_body_count)
+            self.assertEqual(0, analysis.xml_edited_component_count)
             self.assertFalse(analysis.bodies[0].protected_body)
+
+    def test_singular_zero_normal_shape_builds_current_and_optimized_previews(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            definitions = temporary / "definitions"
+            shutil.copytree(FIXTURES / "definitions", definitions)
+            (definitions / "singular_shape.xml").write_text(
+                '''<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Singular Shape"><voxels>
+  <voxel flags="1" physics_shape="10"><position/>
+    <physics_shape_rotation 00="1" 01="0" 02="0" 10="0" 11="1" 12="0" 20="0" 21="0" 22="1"/>
+  </voxel>
+</voxels></definition>
+''',
+                encoding="utf-8",
+            )
+            source = temporary / "singular_zero_normal.xml"
+            source.write_text(
+                '''<?xml version="1.0" encoding="UTF-8"?>
+<vehicle data_version="3"><authors/><bodies><body unique_id="singular"><components>
+  <c d="singular_shape"><o r="2,0,-1,1,0,-2,-2,0,-2"><vp y="1"/></o></c>
+</components></body></bodies></vehicle>
+''',
+                encoding="utf-8",
+            )
+
+            analysis = analyze_vehicle(source, definitions)
+
+        body = analysis.bodies[0]
+        self.assertTrue(body.can_optimize)
+        self.assertEqual(1, body.current_shape_count)
+        self.assertEqual(1, body.optimized_shape_count)
+        self.assertEqual(1, len(body.current_meshes))
+        self.assertEqual(1, len(body.optimized_meshes))
+        self.assertEqual(8, len(body.current_meshes[0].vertices))
+        self.assertEqual(6, len(body.current_meshes[0].faces))
+        self.assertEqual(body.current_meshes, body.optimized_meshes)
+
+    def test_singular_transform_collapsed_voxels_match_native_overlap_count(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            definitions = temporary / "definitions"
+            shutil.copytree(FIXTURES / "definitions", definitions)
+            (definitions / "collapsed_pair.xml").write_text(
+                '''<?xml version="1.0" encoding="UTF-8"?>
+<definition name="Collapsed pair"><voxels>
+  <voxel flags="1" physics_shape="0"><position/></voxel>
+  <voxel flags="1" physics_shape="0"><position x="1"/></voxel>
+</voxels></definition>
+''',
+                encoding="utf-8",
+            )
+            source = temporary / "collapsed_pair.xml"
+            source.write_text(
+                '''<?xml version="1.0" encoding="UTF-8"?>
+<vehicle data_version="3"><authors/><bodies><body unique_id="collapsed"><components>
+  <c d="collapsed_pair"><o r="0,0,0,0,1,0,0,0,1"><vp/></o></c>
+</components></body></bodies></vehicle>
+''',
+                encoding="utf-8",
+            )
+
+            analysis = analyze_vehicle(source, definitions)
+
+        body = analysis.bodies[0]
+        self.assertTrue(body.can_optimize)
+        self.assertEqual(1, body.overlapping_cube_count)
+        self.assertEqual(1, body.current_shape_count)
+        self.assertEqual(1, body.optimized_shape_count)
+        self.assertEqual(1, len(body.current_meshes))
+        self.assertEqual(body.current_meshes, body.optimized_meshes)
 
     def test_overlapping_physics_positions_are_previewed_and_pinned(self):
         analysis = analyze_vehicle(

@@ -82,18 +82,17 @@ def preview_frame(meshes: Iterable[ShapeMesh]) -> PreviewFrame:
 def stormworks_preview_mesh(mesh: ShapeMesh) -> ShapeMesh:
     """Convert native vehicle axes into the game's F2 screen convention.
 
-    A same-frame top-down comparison puts both horizontal vehicle axes on the
-    opposite side of this viewer's default camera.  Rotate the preview 180
-    degrees about vehicle Y rather than reflecting only X; the latter fixes
-    left/right landmarks but reverses the visible slope of asymmetric wedges
-    along Z.  Keep this display-only conversion at the renderer boundary so
-    merge groups, optimization order, and source-preserving XML remain in the
-    native Stormworks coordinate system.
+    Mirror the lateral X axis while preserving Stormworks' native fore-aft Z
+    axis.  Reversing one axis changes handedness, so reverse every face as well
+    to preserve its winding for renderers that use back-face culling.  Keep
+    this display-only conversion at the renderer boundary so merge groups,
+    optimization order, and source-preserving XML remain in the native
+    Stormworks coordinate system.
     """
 
     return ShapeMesh(
-        tuple((-x, y, -z) for x, y, z in mesh.vertices),
-        mesh.faces,
+        tuple((-x, y, z) for x, y, z in mesh.vertices),
+        tuple(tuple(reversed(face)) for face in mesh.faces),
     )
 
 
@@ -180,6 +179,13 @@ def merge_group_mesh(group: PortableMergeGroup) -> ShapeMesh:
         halfspaces.append((positive, maximum[axis]))
     for anchor, normal_int in group.planes:
         normal = tuple(float(value) for value in normal_int)
+        if normal == (0.0, 0.0, 0.0):
+            # A singular XML transform can collapse a non-cube clip normal to
+            # zero.  Stormworks' convex-hull finalizer keeps its initialized
+            # +X normal when normalization cannot replace it; use the same
+            # fallback for display geometry instead of passing a zero vector
+            # to the face-ordering basis calculation.
+            normal = (1.0, 0.0, 0.0)
         display_anchor = tuple(float(value) - 0.5 for value in anchor)
         distance = sum(normal[axis] * display_anchor[axis] for axis in range(3))
         candidate = (normal, distance)

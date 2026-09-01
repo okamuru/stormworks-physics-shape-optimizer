@@ -35,6 +35,7 @@ swphysics/__main__.py
 tools/*
 !tools/build_app_icons.py
 !tools/build_native_core.py
+!tools/audit_xml_edit_support.py
 !tools/qt_ui_smoke.py
 tests/test_binary*.py
 tests/test_cli.py

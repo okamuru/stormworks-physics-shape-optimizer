@@ -9,10 +9,13 @@ use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
 
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 3;
 const MAX_SAMPLES: usize = 12;
 const MAX_SAMPLE_COORDS: usize = MAX_SAMPLES * 3;
 const NO_PLANE: u32 = u32::MAX;
+const FINALIZATION_MARGIN: f32 = 0.041999999433755875;
+const FINALIZATION_PARALLEL_LIMIT: f64 = 0.9900000095367432;
+const FINALIZATION_EPSILON: f64 = 9.999999747378752e-06;
 
 const OK: i32 = 0;
 const ERR_NULL: i32 = 1;
@@ -61,10 +64,17 @@ struct Plane {
     normal: Point,
 }
 
+#[derive(Clone, Copy)]
+struct FinalizationPlane {
+    normal: [f64; 3],
+    distance: f64,
+}
+
 #[derive(Clone)]
 struct Voxel {
     position: Point,
     plane_index: u32,
+    physics_shape: u8,
 }
 
 #[derive(Clone)]
@@ -76,7 +86,7 @@ struct PlaneVoxel {
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct SamplePattern {
     sample_count: u8,
-    sample_offsets: [i8; MAX_SAMPLE_COORDS],
+    sample_offsets: [i32; MAX_SAMPLE_COORDS],
     collision_threshold: u8,
 }
 
@@ -183,6 +193,216 @@ fn checked_slice<'a, T>(pointer: *const T, length: usize) -> Result<&'a [T], i32
         return Err(ERR_NULL);
     }
     Ok(unsafe { slice::from_raw_parts(pointer, length) })
+}
+
+fn finalization_dot(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+fn finalization_determinant(rows: [[f64; 3]; 3]) -> f64 {
+    rows[0][0] * (rows[1][1] * rows[2][2] - rows[1][2] * rows[2][1])
+        - rows[0][1] * (rows[1][0] * rows[2][2] - rows[1][2] * rows[2][0])
+        + rows[0][2] * (rows[1][0] * rows[2][1] - rows[1][1] * rows[2][0])
+}
+
+fn finalization_intersection(
+    first: FinalizationPlane,
+    second: FinalizationPlane,
+    third: FinalizationPlane,
+) -> Option<[f64; 3]> {
+    let normals = [first.normal, second.normal, third.normal];
+    for (left, right) in [(0usize, 1usize), (0, 2), (1, 2)] {
+        if finalization_dot(normals[left], normals[right]).abs()
+            >= FINALIZATION_PARALLEL_LIMIT
+        {
+            return None;
+        }
+    }
+    let determinant = finalization_determinant(normals);
+    if determinant == 0.0 {
+        return None;
+    }
+    let distances = [first.distance, second.distance, third.distance];
+    let mut result = [0.0; 3];
+    for column in 0..3 {
+        let mut rows = normals;
+        for row in 0..3 {
+            rows[row][column] = distances[row];
+        }
+        result[column] = finalization_determinant(rows) / determinant;
+    }
+    Some(result)
+}
+
+fn finalization_normal(normal: Point) -> [f32; 3] {
+    let values = [normal.x as f32, normal.y as f32, normal.z as f32];
+    let xy_squared = values[0] * values[0] + values[1] * values[1];
+    let length = (xy_squared + values[2] * values[2]).sqrt();
+    if length <= 0.0 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [
+            values[0] / length,
+            values[1] / length,
+            values[2] / length,
+        ]
+    }
+}
+
+fn zero_custom_plane_margin(physics_shape: u8) -> bool {
+    matches!(
+        physics_shape,
+        6 | 7
+            | 8
+            | 9
+            | 12
+            | 13
+            | 14
+            | 15
+            | 18
+            | 19
+            | 20
+            | 21
+            | 22
+            | 23
+            | 24
+            | 25
+            | 28
+            | 29
+            | 30
+            | 31
+    )
+}
+
+fn finalization_planes(
+    minimum: Point,
+    maximum: Point,
+    planes: &[Plane],
+    seed_physics_shape: u8,
+) -> Vec<FinalizationPlane> {
+    let minimum_world = [
+        minimum.x as f32 * 0.25 - 0.125,
+        minimum.y as f32 * 0.25 - 0.125,
+        minimum.z as f32 * 0.25 - 0.125,
+    ];
+    let maximum_world = [
+        maximum.x as f32 * 0.25 + 0.125,
+        maximum.y as f32 * 0.25 + 0.125,
+        maximum.z as f32 * 0.25 + 0.125,
+    ];
+    let center = [
+        (minimum_world[0] + maximum_world[0]) * 0.5,
+        (minimum_world[1] + maximum_world[1]) * 0.5,
+        (minimum_world[2] + maximum_world[2]) * 0.5,
+    ];
+    let mut result = Vec::with_capacity(6 + planes.len());
+    for axis in 0..3 {
+        let mut negative = [0.0; 3];
+        let mut positive = [0.0; 3];
+        negative[axis] = -1.0;
+        positive[axis] = 1.0;
+        result.push(FinalizationPlane {
+            normal: negative,
+            distance: f64::from(
+                center[axis] - minimum_world[axis] - FINALIZATION_MARGIN,
+            ),
+        });
+        result.push(FinalizationPlane {
+            normal: positive,
+            distance: f64::from(
+                maximum_world[axis] - center[axis] - FINALIZATION_MARGIN,
+            ),
+        });
+    }
+
+    let custom_margin_scale = if zero_custom_plane_margin(seed_physics_shape) {
+        0.0f32
+    } else {
+        1.0f32
+    };
+    for plane in planes {
+        let normal_f32 = finalization_normal(plane.normal);
+        let normal = [
+            f64::from(normal_f32[0]),
+            f64::from(normal_f32[1]),
+            f64::from(normal_f32[2]),
+        ];
+        let anchors = [plane.anchor.x, plane.anchor.y, plane.anchor.z];
+        let mut point_f32 = [0.0f32; 3];
+        for axis in 0..3 {
+            let coordinate = ((anchors[axis] as f32 - 0.5) * 0.25) - center[axis];
+            let margin =
+                normal_f32[axis] * FINALIZATION_MARGIN * custom_margin_scale;
+            point_f32[axis] = coordinate - margin;
+        }
+        let point = [
+            f64::from(point_f32[0]),
+            f64::from(point_f32[1]),
+            f64::from(point_f32[2]),
+        ];
+        result.push(FinalizationPlane {
+            normal,
+            distance: finalization_dot(normal, point),
+        });
+    }
+    result
+}
+
+fn finalization_vertex_count(
+    minimum: Point,
+    maximum: Point,
+    planes: &[Plane],
+    seed_physics_shape: u8,
+) -> usize {
+    if planes.is_empty() {
+        return 8;
+    }
+    let final_planes =
+        finalization_planes(minimum, maximum, planes, seed_physics_shape);
+    let mut vertices = Vec::new();
+    for first in 0..final_planes.len() {
+        for second in first + 1..final_planes.len() {
+            for third in second + 1..final_planes.len() {
+                if let Some(point) = finalization_intersection(
+                    final_planes[first],
+                    final_planes[second],
+                    final_planes[third],
+                ) {
+                    vertices.push(point);
+                }
+            }
+        }
+    }
+
+    let mut index = 0usize;
+    while index < vertices.len() {
+        let point = vertices[index];
+        if final_planes.iter().any(|plane| {
+            finalization_dot(plane.normal, point)
+                > plane.distance + FINALIZATION_EPSILON
+        }) {
+            vertices.swap_remove(index);
+        } else {
+            index += 1;
+        }
+    }
+
+    let mut first = 0usize;
+    while first < vertices.len() {
+        let mut second = first + 1;
+        while second < vertices.len() {
+            let distance_squared = (vertices[first][0] - vertices[second][0]).powi(2)
+                + (vertices[first][1] - vertices[second][1]).powi(2)
+                + (vertices[first][2] - vertices[second][2]).powi(2);
+            if distance_squared < FINALIZATION_EPSILON {
+                vertices.swap_remove(second);
+            } else {
+                second += 1;
+            }
+        }
+        first += 1;
+    }
+    vertices.len()
 }
 
 fn planes_coplanar(left: Plane, right: Plane) -> bool {
@@ -525,17 +745,19 @@ fn try_expand(
     }
 
     // Native second pass uses temporary planes before the group's existing
-    // planes.  Preserve that order because duplicate samples and thresholds
-    // are build-pinned behaviour, not a generic convex-hull approximation.
+    // planes.  Only a newly proposed plane triggers rejection; existing planes
+    // may still provide the shape-intersection evidence.  Preserve the full
+    // order because duplicate samples and thresholds are build-pinned.
     for &index in additions.iter() {
         let voxel = &voxels[index];
-        let mut cell_intersects = false;
+        let cell_intersects = temporary_planes
+            .iter()
+            .any(|&plane| voxel_collide_plane(voxel.position, plane) == 0);
         let mut shape_intersects = false;
         for &plane in temporary_planes.iter().chain(planes.iter()) {
             if voxel_collide_plane(voxel.position, plane) != 0 {
                 continue;
             }
-            cell_intersects = true;
             if voxel.plane_index != NO_PLANE
                 && physics_voxel_collide_plane(
                     voxel,
@@ -623,6 +845,24 @@ impl Evaluator {
             if seed.plane_index != NO_PLANE {
                 planes.push(self.plane_voxels[seed.plane_index as usize].plane);
             }
+            // The source vector retains duplicate voxels, but the game's
+            // octree lookup retains the latest write at each position.  An
+            // older duplicate seed consumes that lookup winner only when the
+            // position is inside or crossing its initialized hull; only the
+            // seed contributes the group's initial clip plane.
+            if self.has_overlaps
+                && voxel_collide_planes(seed.position, &planes) <= 0
+            {
+                if let Some(overlap_winner) =
+                    by_position.get(seed.position, &self.voxels)
+                {
+                    if overlap_winner != seed_index
+                        && self.processed[overlap_winner] == 0
+                    {
+                        self.processed[overlap_winner] = 1;
+                    }
+                }
+            }
             let mut blocked = [false; 6];
             loop {
                 let mut changed = false;
@@ -652,7 +892,16 @@ impl Evaluator {
                     break;
                 }
             }
-            shape_count += 1;
+            if planes.is_empty()
+                || finalization_vertex_count(
+                    minimum,
+                    maximum,
+                    &planes,
+                    seed.physics_shape,
+                ) >= 4
+            {
+                shape_count += 1;
+            }
         }
         u32::try_from(shape_count).map_err(|_| ERR_COUNT_OVERFLOW)
     }
@@ -669,9 +918,10 @@ pub extern "C" fn swp_prepared_create(
     positions: *const i32,
     plane_values: *const i32,
     plane_present: *const u8,
+    physics_shapes: *const u8,
     voxel_sample_patterns: *const u32,
     sample_counts: *const u8,
-    sample_offsets: *const i8,
+    sample_offsets: *const i32,
     sample_stride: usize,
     collision_thresholds: *const u8,
     sample_pattern_count: usize,
@@ -691,6 +941,7 @@ pub extern "C" fn swp_prepared_create(
         let plane_values =
             checked_slice(plane_values, voxel_count.checked_mul(6).ok_or(ERR_LAYOUT)?)?;
         let plane_present = checked_slice(plane_present, voxel_count)?;
+        let physics_shapes = checked_slice(physics_shapes, voxel_count)?;
         let voxel_sample_patterns = checked_slice(voxel_sample_patterns, voxel_count)?;
         let sample_counts = checked_slice(sample_counts, sample_pattern_count)?;
         let sample_offsets = checked_slice(
@@ -725,7 +976,7 @@ pub extern "C" fn swp_prepared_create(
             if count > sample_stride || count > MAX_SAMPLES {
                 return Err(ERR_LAYOUT);
             }
-            let mut offsets_for_voxel = [0i8; MAX_SAMPLE_COORDS];
+            let mut offsets_for_voxel = [0i32; MAX_SAMPLE_COORDS];
             let source_base = pattern_index * sample_stride * 3;
             offsets_for_voxel[..count * 3]
                 .copy_from_slice(&sample_offsets[source_base..source_base + count * 3]);
@@ -762,6 +1013,7 @@ pub extern "C" fn swp_prepared_create(
             let voxel = Voxel {
                 position,
                 plane_index,
+                physics_shape: physics_shapes[index],
             };
             voxels.push(voxel);
         }

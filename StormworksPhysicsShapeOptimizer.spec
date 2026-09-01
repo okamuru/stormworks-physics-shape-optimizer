@@ -77,9 +77,9 @@ if is_macos:
         bundle_identifier="com.irisnuiyama164.stormworks-physics-shape-optimizer",
         info_plist={
             "CFBundleDisplayName": "Stormworks Physics Shape Optimizer",
-            "CFBundleGetInfoString": "Stormworks Physics Shape Optimizer 1.1.0 Alpha — IrisNuiYaMa_164",
-            "CFBundleShortVersionString": "1.1.0",
-            "CFBundleVersion": "1100",
+            "CFBundleGetInfoString": "Stormworks Physics Shape Optimizer 1.2.0 Alpha — IrisNuiYaMa_164",
+            "CFBundleShortVersionString": "1.2.0",
+            "CFBundleVersion": "1200",
             "LSMinimumSystemVersion": "12.0",
             "NSHighResolutionCapable": True,
             "NSHumanReadableCopyright": "Copyright © 2026 IrisNuiYaMa_164",

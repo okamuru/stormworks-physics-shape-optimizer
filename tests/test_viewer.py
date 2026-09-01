@@ -29,7 +29,7 @@ class ViewerMathTests(unittest.TestCase):
         self.assertIn((-0.5, -0.5, -0.5), vertices)
         self.assertIn((1.5, 2.5, 3.5), vertices)
 
-    def test_stormworks_preview_rotates_around_y_without_changing_faces(self):
+    def test_stormworks_preview_mirrors_x_and_preserves_fore_aft_axis(self):
         source = ShapeMesh(
             ((2.0, -3.0, 5.0), (-7.0, 11.0, 13.0), (17.0, 19.0, -23.0)),
             ((0, 1, 2),),
@@ -38,10 +38,10 @@ class ViewerMathTests(unittest.TestCase):
         preview = stormworks_preview_mesh(source)
 
         self.assertEqual(
-            ((-2.0, -3.0, -5.0), (7.0, 11.0, -13.0), (-17.0, 19.0, 23.0)),
+            ((-2.0, -3.0, 5.0), (7.0, 11.0, 13.0), (-17.0, 19.0, -23.0)),
             preview.vertices,
         )
-        self.assertEqual(source.faces, preview.faces)
+        self.assertEqual(((2, 1, 0),), preview.faces)
 
     def test_preview_frame_covers_separated_bodies(self):
         frame = preview_frame(
@@ -91,6 +91,29 @@ class ViewerMathTests(unittest.TestCase):
         self.assertEqual(5, len(mesh.faces))
         self.assertTrue(
             all(point[0] + point[1] <= 0.0 + 1e-7 for point in mesh.vertices)
+        )
+
+    def test_merge_group_mesh_uses_native_fallback_for_zero_clip_normal(self):
+        group = PortableMergeGroup(
+            seed_insertion_index=0,
+            voxel_insertion_indices=(0,),
+            component_indices=(0,),
+            minimum=(0, 1, 0),
+            maximum=(0, 1, 0),
+            planes=(((4, 1, 4), (0, 0, 0)),),
+            seed_physics_shape=10,
+        )
+
+        mesh = merge_group_mesh(group)
+
+        self.assertEqual(8, len(mesh.vertices))
+        self.assertEqual(6, len(mesh.faces))
+        self.assertEqual(
+            ((-0.5, 0.5, -0.5), (0.5, 1.5, 0.5)),
+            (
+                tuple(min(point[axis] for point in mesh.vertices) for axis in range(3)),
+                tuple(max(point[axis] for point in mesh.vertices) for axis in range(3)),
+            ),
         )
 
     def test_box_face_normals_are_oriented_outward_despite_inward_winding(self):

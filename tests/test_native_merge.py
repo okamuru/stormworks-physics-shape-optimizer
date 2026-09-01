@@ -120,6 +120,37 @@ class NativeMergeTests(unittest.TestCase):
                 prepared.shape_count_order(order),
             )
 
+    def test_overlap_seed_plane_and_triple_winner_match_python(self):
+        rotation = PROPER_GRID_ROTATIONS[0]
+        rejected_then_valid = PreparedPortableMergeEvaluator(
+            (
+                (voxel(0, (0, 0, 0), 21, rotation),),
+                (voxel(1, (0, 0, 0), 10, rotation),),
+            ),
+            allow_overlaps=True,
+        )
+        triple_cube = PreparedPortableMergeEvaluator(
+            tuple(
+                (voxel(index, (0, 0, 0), 0, rotation),)
+                for index in range(3)
+            ),
+            allow_overlaps=True,
+        )
+
+        self.assertEqual("rust_cdylib", rejected_then_valid.native_backend)
+        self.assertEqual(0, rejected_then_valid.shape_count_order((0, 1)))
+        self.assertEqual(1, rejected_then_valid.shape_count_order((1, 0)))
+        self.assertEqual("rust_cdylib", triple_cube.native_backend)
+        self.assertEqual(2, triple_cube.shape_count_order((0, 1, 2)))
+        self.assertEqual(
+            triple_cube._partition_order(
+                (0, 1, 2),
+                collect_groups=False,
+                validate_order=False,
+            ),
+            triple_cube.shape_count_order((0, 1, 2)),
+        )
+
     def test_native_boundary_rejects_invalid_order_without_crashing(self):
         rotation = PROPER_GRID_ROTATIONS[0]
         prepared = PreparedPortableMergeEvaluator(

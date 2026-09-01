@@ -31,14 +31,14 @@ class UnifiedPreviewCoordinateTests(unittest.TestCase):
     def setUpClass(cls):
         cls.application = QApplication.instance() or QApplication([])
 
-    def test_shared_viewer_rotates_vehicle_around_y_at_renderer_boundary(self):
+    def test_shared_viewer_mirrors_x_but_preserves_fore_aft_at_renderer_boundary(self):
         viewer = UnifiedPhysicsShapeViewer()
         viewer.set_shapes((box_mesh(Box((3, 0, 5), (3, 0, 5))),))
 
         preview_x = tuple(vertex[0] for vertex in viewer.meshes[0].vertices)
         preview_z = tuple(vertex[2] for vertex in viewer.meshes[0].vertices)
         self.assertEqual((-3.5, -2.5), (min(preview_x), max(preview_x)))
-        self.assertEqual((-5.5, -4.5), (min(preview_z), max(preview_z)))
+        self.assertEqual((4.5, 5.5), (min(preview_z), max(preview_z)))
         viewer.close()
 
     def test_set_boxes_uses_the_same_preview_conversion(self):
@@ -94,6 +94,13 @@ class UnifiedPreviewCoordinateTests(unittest.TestCase):
             (
                 min(vertex[0] for vertex in group.meshes[0].vertices),
                 max(vertex[0] for vertex in group.meshes[0].vertices),
+            ),
+        )
+        self.assertEqual(
+            (4.5, 5.5),
+            (
+                min(vertex[2] for vertex in group.meshes[0].vertices),
+                max(vertex[2] for vertex in group.meshes[0].vertices),
             ),
         )
         viewer.close()

@@ -19,16 +19,14 @@ from .exact_optimizer import (
     pinned_non_physics_component_order,
 )
 from .component_package import install_component_package, plan_component_package
-from .model import WorldVoxel
 from .optimizer import (
     UnsupportedVehicleError,
-    _is_axis_aligned_unit_transform,
     _parse_with_comments,
     validate_mixed_component_groups,
 )
 from .partition import Box
-from .portable_merge import PortableMergeOracle, PortableMergeResult, voxel_clip_plane
-from .rotations import GRID_TRANSFORMS
+from .physics_support import unsupported_component_indices
+from .portable_merge import PortableMergeOracle, PortableMergeResult
 from .source_preserving_xml import write_vehicle_component_order_preserving_source
 from .surface_flood_fill import model_surface_physics_flood_fill
 from .vehicle import ComponentPlacement, load_vehicle
@@ -371,65 +369,13 @@ class OptimizationOutput:
 
 
 def _boxes(result: PortableMergeResult) -> Tuple[Box, ...]:
-    return tuple(Box(group.minimum, group.maximum) for group in result.groups)
+    return tuple(
+        Box(group.minimum, group.maximum) for group in result.finalized_groups
+    )
 
 
 def _meshes(result: PortableMergeResult) -> Tuple[ShapeMesh, ...]:
-    return tuple(merge_group_mesh(group) for group in result.groups)
-
-
-def _xml_edited_non_cube_component_indices(
-    components: Tuple[ComponentPlacement, ...],
-    voxels: Sequence[WorldVoxel],
-) -> set[int]:
-    """Return non-cube placements transformed outside the editor grid.
-
-    Normal editor rotations are signed permutation matrices.  Vehicle XML can
-    contain arbitrary integer scale/shear matrices.  Full cubes remain grid
-    occupancy cells in the native builder, but a non-cube clip plane under
-    such a matrix is outside the portable model's exact contract.
-    """
-
-    non_grid_components = {
-        component_index
-        for component_index, component in enumerate(components)
-        if not _is_axis_aligned_unit_transform(component.effective_transform)
-    }
-    return {
-        voxel.component_index
-        for voxel in voxels
-        if (
-            voxel.physics_shape != 0
-            and voxel.component_index in non_grid_components
-        )
-    }
-
-
-def _unmodelled_component_indices(
-    components: Tuple[ComponentPlacement, ...],
-    voxels: Sequence[WorldVoxel],
-) -> set[int]:
-    """Detect component geometry the portable Shape model cannot represent."""
-
-    excluded = _xml_edited_non_cube_component_indices(components, voxels)
-    grid_transforms = frozenset(GRID_TRANSFORMS)
-    for voxel in voxels:
-        if voxel.component_index in excluded:
-            continue
-        if (
-            voxel.physics_shape != 0
-            and voxel.physics_rotation not in grid_transforms
-        ):
-            excluded.add(voxel.component_index)
-            continue
-        try:
-            voxel_clip_plane(voxel)
-        except ValueError:
-            # One unsupported voxel makes the complete Component an ordering
-            # barrier.  Splitting a multi-voxel Component would change the
-            # atomic insertion contract used by Stormworks.
-            excluded.add(voxel.component_index)
-    return excluded
+    return tuple(merge_group_mesh(group) for group in result.finalized_groups)
 
 
 def analyze_vehicle(
@@ -511,7 +457,7 @@ def analyze_vehicle(
             0.15,
             "Physics voxelを展開しました（{} voxel）".format(len(static_voxels)),
         )
-        unmodelled_components = _unmodelled_component_indices(
+        unmodelled_components = unsupported_component_indices(
             body.components,
             static_voxels,
         )
@@ -746,6 +692,18 @@ def analyze_vehicle(
                     or component_index in protected_physics_components
                 )
             )
+            unsupported_barrier_offsets = tuple(
+                sorted(
+                    {
+                        sum(
+                            physics_index < component_index
+                            for physics_index in physics_component_indices
+                        )
+                        for component_index in unmodelled_physics_components
+                    }
+                    - {0, len(physics_component_indices)}
+                )
+            )
 
             def report_search(
                 stage_index: int,
@@ -800,6 +758,7 @@ def analyze_vehicle(
                     trailing_voxels=trailing_voxels,
                     search_backend="portable_exact",
                     fixed_component_indices=fixed_physics_indices,
+                    component_barrier_offsets=unsupported_barrier_offsets,
                     progress_callback=report_search,
                     worker_count=worker_count,
                 )

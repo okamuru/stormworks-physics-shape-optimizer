@@ -6,6 +6,8 @@ Author: **IrisNuiYaMa_164**
 
 [Downloads](https://github.com/okamuru/stormworks-physics-shape-optimizer/releases)
 
+[更新履歴 / Changelog](CHANGELOG.md)
+
 Stormworksの車両XMLを解析し、Physics Shapeを減らせるComponent順序を探して、元ファイルとは別の最適化コピーを保存するアプリです。
 
 ## 使い方
@@ -26,6 +28,8 @@ Stormworksの車両XMLを解析し、Physics Shapeを減らせるComponent順序
 - 車両の作者情報は変更しません。
 - Componentの設定、配線、マイコン、Component MODの内容は変更しません。
 - 最終的なShapeの確認はゲーム内F2表示で行ってください。
+- XMLで変形された既知のPhysicsブロックも解析・最適化できます。
+- 対応外のComponentは元の位置関係を保ち、それ以外を安全な範囲で最適化します。
 
 ## ソースから起動する
 
@@ -56,5 +60,5 @@ Copyright (c) 2026 IrisNuiYaMa_164
 
 ## バージョン情報
 
-- バージョン: 1.1.0 Alpha
+- バージョン: 1.2.0 Alpha
 - 作者: IrisNuiYaMa_164

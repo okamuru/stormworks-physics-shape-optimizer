@@ -1,11 +1,11 @@
 # Corresponding Source Code
 
-This package contains Stormworks Physics Shape Optimizer V1.1.0 Alpha.
+This package contains Stormworks Physics Shape Optimizer V1.2.0 Alpha.
 
 The complete corresponding application source for this binary release is the
-Git tag `v1.1.0-alpha` at:
+Git tag `v1.2.0-alpha` at:
 
-https://github.com/okamuru/stormworks-physics-shape-optimizer/tree/v1.1.0-alpha
+https://github.com/okamuru/stormworks-physics-shape-optimizer/tree/v1.2.0-alpha
 
 Build instructions are in `BUILDING.md` in that source tree. The GitHub Release
 page also provides automatically generated source archives for the same tag.

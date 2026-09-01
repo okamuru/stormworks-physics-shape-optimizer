@@ -145,6 +145,49 @@ class ComponentPlacement:
             for z in range(self.microprocessor_length)
         )
 
+    def world_physics_voxels(
+        self,
+        definition: ComponentDefinition,
+        body_index: int,
+        body_id: str,
+        insertion_index_start: int = 0,
+    ) -> Tuple[WorldVoxel, ...]:
+        """Expand this placement without requiring every Body Definition.
+
+        The per-Component entry point is useful to coverage audits: an unknown
+        Component MOD can be reported and skipped without hiding the supported
+        placements in the rest of the Body.
+        """
+
+        result = []
+        effective_transform = self.effective_transform
+        insertion_index = insertion_index_start
+        for definition_voxel_index, voxel in enumerate(
+            self.physics_definition_voxels(definition)
+        ):
+            if not voxel.contributes_physics:
+                continue
+            result.append(
+                WorldVoxel(
+                    body_index=body_index,
+                    body_id=body_id,
+                    component_index=self.index,
+                    component_definition=self.definition_id,
+                    definition_voxel_index=definition_voxel_index,
+                    insertion_index=insertion_index,
+                    position=add_points(
+                        self.position,
+                        apply_matrix(effective_transform, voxel.position),
+                    ),
+                    physics_shape=voxel.physics_shape,
+                    physics_rotation=multiply_matrices(
+                        effective_transform, voxel.physics_rotation
+                    ),
+                )
+            )
+            insertion_index += 1
+        return tuple(result)
+
     def buoyancy_definition_surfaces(
         self, definition: ComponentDefinition
     ) -> Iterable[DefinitionSurface]:
@@ -204,38 +247,14 @@ class Vehicle:
         insertion_index = 0
         for component in body.components:
             definition = catalog.load(component.definition_id)
-            effective_transform = component.effective_transform
-            for definition_voxel_index, voxel in enumerate(
-                component.physics_definition_voxels(definition)
-            ):
-                if not voxel.contributes_physics:
-                    continue
-                world_position = add_points(
-                    component.position,
-                    apply_matrix(effective_transform, voxel.position),
-                )
-                # The game selects a mirrored Definition and passes its
-                # transform index separately to physics_voxel_data. Folding
-                # that signed local transform into this matrix is exactly
-                # equivalent to native R * S * physics_rotation and lets the
-                # portable merger operate without runtime object state.
-                world_rotation = multiply_matrices(
-                    effective_transform, voxel.physics_rotation
-                )
-                result.append(
-                    WorldVoxel(
-                        body_index=body.index,
-                        body_id=body.body_id,
-                        component_index=component.index,
-                        component_definition=component.definition_id,
-                        definition_voxel_index=definition_voxel_index,
-                        insertion_index=insertion_index,
-                        position=world_position,
-                        physics_shape=voxel.physics_shape,
-                        physics_rotation=world_rotation,
-                    )
-                )
-                insertion_index += 1
+            component_voxels = component.world_physics_voxels(
+                definition,
+                body.index,
+                body.body_id,
+                insertion_index,
+            )
+            result.extend(component_voxels)
+            insertion_index += len(component_voxels)
         return tuple(result)
 
 

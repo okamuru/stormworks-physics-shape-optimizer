@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from itertools import chain, product
+from itertools import chain, combinations, product
+import math
 import os
+import struct
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .model import GridPoint, WorldVoxel, apply_matrix
@@ -20,6 +22,7 @@ from .non_cube_data import (
     NON_CUBE_COLLISION_THRESHOLDS,
     NON_CUBE_SAMPLE_POINTS_QUARTERS,
 )
+from .rotations import GRID_TRANSFORMS
 
 
 Plane = Tuple[GridPoint, GridPoint]
@@ -41,6 +44,204 @@ DIRECTIONS: Tuple[GridPoint, ...] = (
 # permanently hiding valid wedge merges.
 _RETRY_AFTER_PERPENDICULAR_EXPANSION = object()
 
+# build() shrinks every generated convex hull by this Bullet collision margin.
+# The value and the per-shape zero-margin table below are taken from build
+# 24749959's c_vehicle_physics_builder::build.  They matter for XML-scaled
+# wedges: merge_shape may produce a group whose shrunken hull has fewer than
+# four vertices, in which case the game leaves the collision shape null and F2
+# does not display/count it.
+_FINALIZATION_MARGIN = 0.041999999433755875
+_FINALIZATION_PARALLEL_LIMIT = 0.9900000095367432
+_FINALIZATION_EPSILON = 9.999999747378752e-06
+_ZERO_CUSTOM_PLANE_MARGIN_SHAPES = frozenset(
+    (6, 7, 8, 9, 12, 13, 14, 15, 18, 19, 20, 21, 22, 23, 24, 25, 28, 29, 30, 31)
+)
+_GRID_TRANSFORM_SET = frozenset(GRID_TRANSFORMS)
+
+
+class UnsupportedPhysicsShapeError(ValueError):
+    """A Definition uses a physics_shape unknown to the pinned model."""
+
+
+def _float32(value: float) -> float:
+    """Round one intermediate like the native SSE single-precision path."""
+
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+def _finalization_dot(
+    left: Sequence[float], right: Sequence[float]
+) -> float:
+    return sum(left[axis] * right[axis] for axis in range(3))
+
+
+def _finalization_normal(normal: GridPoint) -> Tuple[float, float, float]:
+    values = tuple(_float32(float(value)) for value in normal)
+    xy_squared = _float32(
+        _float32(values[0] * values[0])
+        + _float32(values[1] * values[1])
+    )
+    length = _float32(
+        math.sqrt(
+            _float32(xy_squared + _float32(values[2] * values[2]))
+        )
+    )
+    if length <= 0.0:
+        # vec3_f32::normalise() leaves the build routine's initialized unit-X
+        # fallback in place for a zero XML matrix.
+        return (1.0, 0.0, 0.0)
+    return tuple(_float32(value / length) for value in values)  # type: ignore[return-value]
+
+
+def _finalization_determinant(
+    first: Sequence[float],
+    second: Sequence[float],
+    third: Sequence[float],
+) -> float:
+    return (
+        first[0] * (second[1] * third[2] - second[2] * third[1])
+        - first[1] * (second[0] * third[2] - second[2] * third[0])
+        + first[2] * (second[0] * third[1] - second[1] * third[0])
+    )
+
+
+def _finalization_intersection(
+    first: Tuple[Tuple[float, float, float], float],
+    second: Tuple[Tuple[float, float, float], float],
+    third: Tuple[Tuple[float, float, float], float],
+) -> Optional[Tuple[float, float, float]]:
+    normals = (first[0], second[0], third[0])
+    for left, right in (
+        (normals[0], normals[1]),
+        (normals[0], normals[2]),
+        (normals[1], normals[2]),
+    ):
+        if abs(_finalization_dot(left, right)) >= _FINALIZATION_PARALLEL_LIMIT:
+            return None
+    determinant = _finalization_determinant(*normals)
+    if determinant == 0.0:
+        return None
+    distances = (first[1], second[1], third[1])
+    coordinates = []
+    for column in range(3):
+        rows = [list(normal) for normal in normals]
+        for row_index in range(3):
+            rows[row_index][column] = distances[row_index]
+        coordinates.append(_finalization_determinant(*rows) / determinant)
+    return tuple(coordinates)  # type: ignore[return-value]
+
+
+def _finalization_planes(
+    minimum: GridPoint,
+    maximum: GridPoint,
+    planes: Sequence[Plane],
+    seed_physics_shape: int,
+) -> Tuple[Tuple[Tuple[float, float, float], float], ...]:
+    minimum_world = tuple(
+        _float32(_float32(float(value)) * 0.25 - 0.125)
+        for value in minimum
+    )
+    maximum_world = tuple(
+        _float32(_float32(float(value)) * 0.25 + 0.125)
+        for value in maximum
+    )
+    center = tuple(
+        _float32(_float32(minimum_world[axis] + maximum_world[axis]) * 0.5)
+        for axis in range(3)
+    )
+    result: List[Tuple[Tuple[float, float, float], float]] = []
+    for axis in range(3):
+        negative = tuple(-1.0 if index == axis else 0.0 for index in range(3))
+        positive = tuple(1.0 if index == axis else 0.0 for index in range(3))
+        negative_distance = _float32(
+            _float32(center[axis] - minimum_world[axis]) - _FINALIZATION_MARGIN
+        )
+        positive_distance = _float32(
+            _float32(maximum_world[axis] - center[axis]) - _FINALIZATION_MARGIN
+        )
+        result.append((negative, float(negative_distance)))
+        result.append((positive, float(positive_distance)))
+
+    custom_margin_scale = (
+        0.0
+        if seed_physics_shape in _ZERO_CUSTOM_PLANE_MARGIN_SHAPES
+        else 1.0
+    )
+    for anchor, normal_int in planes:
+        normal = _finalization_normal(normal_int)
+        point = []
+        for axis in range(3):
+            coordinate = _float32(
+                _float32(_float32(float(anchor[axis]) - 0.5) * 0.25)
+                - center[axis]
+            )
+            margin = _float32(
+                _float32(normal[axis] * _FINALIZATION_MARGIN)
+                * custom_margin_scale
+            )
+            point.append(_float32(coordinate - margin))
+        result.append((normal, _finalization_dot(normal, point)))
+    return tuple(result)
+
+
+def finalization_vertex_count(
+    minimum: GridPoint,
+    maximum: GridPoint,
+    planes: Sequence[Plane],
+    seed_physics_shape: int,
+) -> int:
+    """Return build()'s surviving convex vertex count for one merge group.
+
+    Cube-only groups use the native box path and therefore always contribute
+    one F2 shape.  Clipped groups enumerate intersections of three sufficiently
+    independent planes, discard points outside any half-space, collapse points
+    closer than the build's epsilon, and require at least four survivors.
+    """
+
+    if not planes:
+        return 8
+    finalization_planes = _finalization_planes(
+        minimum,
+        maximum,
+        planes,
+        seed_physics_shape,
+    )
+    vertices = []
+    for plane_triple in combinations(finalization_planes, 3):
+        point = _finalization_intersection(*plane_triple)
+        if point is not None:
+            vertices.append(point)
+
+    # Mirror mm_vector::erase_reorder: rejected entries are replaced with the
+    # current last entry and the same index is tested again.
+    index = 0
+    while index < len(vertices):
+        point = vertices[index]
+        if any(
+            _finalization_dot(normal, point) > distance + _FINALIZATION_EPSILON
+            for normal, distance in finalization_planes
+        ):
+            vertices[index] = vertices[-1]
+            vertices.pop()
+        else:
+            index += 1
+
+    first_index = 0
+    while first_index < len(vertices):
+        second_index = first_index + 1
+        while second_index < len(vertices):
+            distance_squared = sum(
+                (vertices[first_index][axis] - vertices[second_index][axis]) ** 2
+                for axis in range(3)
+            )
+            if distance_squared < _FINALIZATION_EPSILON:
+                vertices[second_index] = vertices[-1]
+                vertices.pop()
+            else:
+                second_index += 1
+        first_index += 1
+    return len(vertices)
+
 
 def _dot(left: Sequence[int], right: Sequence[int]):
     return sum(left[index] * right[index] for index in range(3))
@@ -49,14 +250,17 @@ def _dot(left: Sequence[int], right: Sequence[int]):
 def _transform_grid_anchor(
     anchor: GridPoint, rotation: Tuple[int, ...]
 ) -> GridPoint:
-    # Grid rotations act about the centre of the unit voxel.  Doubling first
-    # keeps the affine half-voxel translation exact and integral.
+    # Component matrices act about the centre of the unit voxel.  The native
+    # constructor performs this doubled-coordinate calculation with signed
+    # integer division, which truncates half-grid results toward zero.  That
+    # detail is observable for even XML scale and shear matrices.
     centred = tuple(2 * value - 1 for value in anchor)
     rotated = apply_matrix(rotation, centred)  # type: ignore[arg-type]
-    values = tuple((value + 1) // 2 for value in rotated)
-    if any((value + 1) % 2 for value in rotated):
-        raise ValueError("physics rotation produced a non-grid clip-plane anchor")
-    return values  # type: ignore[return-value]
+
+    def divide_by_two(value: int) -> int:
+        return value // 2 if value >= 0 else -((-value) // 2)
+
+    return tuple(divide_by_two(value + 1) for value in rotated)  # type: ignore[return-value]
 
 
 def voxel_clip_plane(voxel: WorldVoxel, runtime_flags: int = 0) -> Optional[Plane]:
@@ -67,7 +271,9 @@ def voxel_clip_plane(voxel: WorldVoxel, runtime_flags: int = 0) -> Optional[Plan
     try:
         anchor, normal = NON_CUBE_CLIP_PLANES[voxel.physics_shape]
     except KeyError as error:
-        raise ValueError("unknown physics_shape {}".format(voxel.physics_shape)) from error
+        raise UnsupportedPhysicsShapeError(
+            "unknown physics_shape {}".format(voxel.physics_shape)
+        ) from error
     rotated_anchor = _transform_grid_anchor(
         anchor, voxel.physics_rotation
     )
@@ -258,6 +464,20 @@ class PortableMergeGroup:
     minimum: GridPoint
     maximum: GridPoint
     planes: Tuple[Plane, ...]
+    seed_physics_shape: int = 0
+
+    @property
+    def finalization_vertex_count(self) -> int:
+        return finalization_vertex_count(
+            self.minimum,
+            self.maximum,
+            self.planes,
+            self.seed_physics_shape,
+        )
+
+    @property
+    def contributes_f2_shape(self) -> bool:
+        return not self.planes or self.finalization_vertex_count >= 4
 
 
 @dataclass(frozen=True)
@@ -269,7 +489,19 @@ class PortableMergeResult:
 
     @property
     def shape_count(self) -> int:
+        return sum(group.contributes_f2_shape for group in self.groups)
+
+    @property
+    def merge_group_count(self) -> int:
         return len(self.groups)
+
+    @property
+    def rejected_convex_group_count(self) -> int:
+        return sum(not group.contributes_f2_shape for group in self.groups)
+
+    @property
+    def finalized_groups(self) -> Tuple[PortableMergeGroup, ...]:
+        return tuple(group for group in self.groups if group.contributes_f2_shape)
 
 
 class PortableMergeOracle:
@@ -367,6 +599,21 @@ class PreparedPortableMergeEvaluator:
         self._native_evaluator = None
         self.native_backend = "python"
         self.native_error = None
+        # Build 24749959 mirrors a non-grid clip-plane anchor differently from
+        # the grid/output-axis rule when runtime flag bits are nonzero.  Keep
+        # that unverified combination on the quarantined Python path rather
+        # than claiming Rust parity.  Ordinary vehicle analysis supplies zero
+        # runtime flags, so XML scale, shear, and singular matrices still use
+        # the native scorer.
+        requires_python_runtime_mirror = any(
+            runtime_flags
+            and voxel.physics_shape != 0
+            and voxel.physics_rotation not in _GRID_TRANSFORM_SET
+            for voxel, runtime_flags in zip(
+                self.voxels,
+                self.voxel_runtime_flags,
+            )
+        )
         self._native_verify = os.environ.get(
             "SWPHYSICS_NATIVE_VERIFY", ""
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -374,16 +621,19 @@ class PreparedPortableMergeEvaluator:
         try:
             from .native_merge import create_native_prepared_evaluator
 
-            self._native_evaluator = create_native_prepared_evaluator(
-                self.voxels,
-                self.component_voxel_indices,
-                self.trailing_voxel_indices,
-                self.voxel_planes,
-                self.voxel_runtime_flags,
-                self.allow_overlaps,
-            )
+            if not requires_python_runtime_mirror:
+                self._native_evaluator = create_native_prepared_evaluator(
+                    self.voxels,
+                    self.component_voxel_indices,
+                    self.trailing_voxel_indices,
+                    self.voxel_planes,
+                    self.voxel_runtime_flags,
+                    self.allow_overlaps,
+                )
             if self._native_evaluator is not None:
                 self.native_backend = "rust_cdylib"
+            elif requires_python_runtime_mirror:
+                self.native_backend = "python_runtime_mirror"
         except Exception as error:
             # The build-pinned Python implementation is the correctness
             # reference and must remain usable on unsupported, quarantined,
@@ -511,6 +761,27 @@ class PreparedPortableMergeEvaluator:
             minimum = maximum = seed.position
             seed_plane = self.voxel_planes[seed_index]
             planes = tuple(() if seed_plane is None else (seed_plane,))
+            # The native builder keeps every source voxel in its seed vector,
+            # while its spatial lookup retains only the latest voxel written
+            # at a position.  When an older duplicate becomes a seed, the
+            # lookup winner inside the initialized seed hull is consumed into
+            # that same group immediately.  It does not contribute its own
+            # clip plane: the seed still defines the initial geometry.  A
+            # singular XML transform can put the seed cell wholly outside its
+            # own transformed plane; native merge_shape does not consume the
+            # overlap winner in that case.
+            if (
+                self.has_overlaps
+                and voxel_collide_planes(seed.position, planes) <= 0
+            ):
+                overlap_winner = by_position.get(seed.position)
+                if (
+                    overlap_winner is not None
+                    and overlap_winner != seed_index
+                    and not processed[overlap_winner]
+                ):
+                    group.append(overlap_winner)
+                    processed[overlap_winner] = 1
             blocked = [False] * len(DIRECTIONS)
             while True:
                 changed = False
@@ -538,7 +809,15 @@ class PreparedPortableMergeEvaluator:
                     changed = True
                 if not changed:
                     break
-            shape_count += 1
+            shape_count += int(
+                not planes
+                or finalization_vertex_count(
+                    minimum,
+                    maximum,
+                    planes,
+                    seed.physics_shape,
+                ) >= 4
+            )
             if collect_groups:
                 if insertion_rank is None:
                     raise RuntimeError("prepared insertion ranks were not built")
@@ -557,6 +836,7 @@ class PreparedPortableMergeEvaluator:
                         minimum=minimum,
                         maximum=maximum,
                         planes=planes,
+                        seed_physics_shape=seed.physics_shape,
                     )
                 )
         if not collect_groups:
@@ -702,12 +982,19 @@ def _try_expand(
         voxel = voxels[index]
         position = voxel.position
         own_plane = voxel_planes[index]
-        cell_intersects = False
+        # Native uses only the newly proposed planes as the reject trigger.
+        # Existing planes may still provide the shape-intersection evidence,
+        # but merely crossing one of them does not by itself invalidate this
+        # new layer.  Including old planes in both roles incorrectly split
+        # XML-scaled adjacent wedge groups.
+        cell_intersects = any(
+            voxel_collide_plane(position, plane) == 0
+            for plane in temporary_planes
+        )
         shape_intersects = False
         for plane in candidate_planes:
             if voxel_collide_plane(position, plane) != 0:
                 continue
-            cell_intersects = True
             if own_plane is not None and physics_voxel_collide_plane(
                 voxel,
                 plane,
@@ -756,9 +1043,10 @@ def partition_portable_exact(
 
     When overlap support is enabled, the spatial lookup retains the latest
     voxel at each coordinate while the source-order seed vector retains every
-    voxel.  This mirrors the native octree/vector split closely enough to
-    preview intentional multi-voxel component overlaps.  Reordering safety is
-    handled separately by pinning every component involved in an overlap.
+    voxel.  Older seeds consume the current lookup winner only when that cell
+    is inside their initialized hull, matching the native octree/vector split.
+    Reordering safety is handled separately by pinning every component
+    involved in an overlap.
     """
 
     ordered = tuple(voxels)
@@ -783,7 +1071,23 @@ def partition_portable_exact(
         group = [seed_index]
         processed[seed_index] = 1
         minimum = maximum = seed.position
-        planes = tuple(() if voxel_planes[seed_index] is None else (voxel_planes[seed_index],))
+        planes = tuple(
+            ()
+            if voxel_planes[seed_index] is None
+            else (voxel_planes[seed_index],)
+        )
+        # Match the game's vector/octree split for repeated positions.  The
+        # latest spatial-lookup winner inside the initialized hull joins an
+        # older seed's group, but that seed alone supplies the initial plane.
+        if has_overlaps and voxel_collide_planes(seed.position, planes) <= 0:
+            overlap_winner = by_position.get(seed.position)
+            if (
+                overlap_winner is not None
+                and overlap_winner != seed_index
+                and not processed[overlap_winner]
+            ):
+                group.append(overlap_winner)
+                processed[overlap_winner] = 1
         blocked = [False] * len(DIRECTIONS)
         while True:
             changed = False
@@ -824,6 +1128,7 @@ def partition_portable_exact(
                 minimum=minimum,
                 maximum=maximum,
                 planes=planes,
+                seed_physics_shape=seed.physics_shape,
             )
         )
     return PortableMergeResult(

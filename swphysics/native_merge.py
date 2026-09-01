@@ -22,7 +22,7 @@ from .non_cube_data import (
 )
 
 
-NATIVE_ABI_VERSION = 2
+NATIVE_ABI_VERSION = 3
 MAX_SAMPLE_STRIDE = max(
     len(points) for points in NON_CUBE_SAMPLE_POINTS_QUARTERS.values()
 )
@@ -94,9 +94,10 @@ class _NativeLibrary:
             ctypes.POINTER(ctypes.c_int32),
             ctypes.POINTER(ctypes.c_int32),
             ctypes.POINTER(ctypes.c_uint8),
+            ctypes.POINTER(ctypes.c_uint8),
             ctypes.POINTER(ctypes.c_uint32),
             ctypes.POINTER(ctypes.c_uint8),
-            ctypes.POINTER(ctypes.c_int8),
+            ctypes.POINTER(ctypes.c_int32),
             ctypes.c_size_t,
             ctypes.POINTER(ctypes.c_uint8),
             ctypes.c_size_t,
@@ -143,7 +144,7 @@ def _load_native_library() -> Optional[_NativeLibrary]:
             continue
         try:
             library = _NativeLibrary(candidate)
-        except (OSError, NativeMergeError) as error:
+        except (AttributeError, OSError, NativeMergeError) as error:
             errors.append("{}: {}".format(candidate, error))
             continue
         _native_load_error = None
@@ -211,12 +212,14 @@ class NativePreparedMergeEvaluator:
         positions = array("i")
         plane_values = array("i")
         plane_present = array("B")
+        physics_shapes = array("B")
         voxel_sample_patterns = array("I")
         pattern_by_key = {}
         patterns = []
         try:
             for index, voxel in enumerate(voxels):
                 positions.extend(voxel.position)
+                physics_shapes.append(voxel.physics_shape)
                 plane = voxel_planes[index]
                 if plane is None:
                     plane_present.append(0)
@@ -258,17 +261,22 @@ class NativePreparedMergeEvaluator:
             ) from error
 
         sample_counts = array("B")
-        sample_offsets = array("b")
+        sample_offsets = array("i")
         collision_thresholds = array("B")
-        for sample_count, transformed_samples, collision_threshold in patterns:
-            sample_counts.append(sample_count)
-            sample_offsets.extend(transformed_samples)
-            sample_offsets.extend(
-                (0,) * (
-                    MAX_SAMPLE_STRIDE * 3 - len(transformed_samples)
+        try:
+            for sample_count, transformed_samples, collision_threshold in patterns:
+                sample_counts.append(sample_count)
+                sample_offsets.extend(transformed_samples)
+                sample_offsets.extend(
+                    (0,) * (
+                        MAX_SAMPLE_STRIDE * 3 - len(transformed_samples)
+                    )
                 )
-            )
-            collision_thresholds.append(collision_threshold)
+                collision_thresholds.append(collision_threshold)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise NativeMergeError(
+                "could not marshal native sample offsets: {}".format(error)
+            ) from error
 
         component_offsets = array("I", (0,))
         expected_start = 0
@@ -289,9 +297,10 @@ class NativePreparedMergeEvaluator:
             _pointer(positions, ctypes.c_int32),
             _pointer(plane_values, ctypes.c_int32),
             _pointer(plane_present, ctypes.c_uint8),
+            _pointer(physics_shapes, ctypes.c_uint8),
             _pointer(voxel_sample_patterns, ctypes.c_uint32),
             _pointer(sample_counts, ctypes.c_uint8),
-            _pointer(sample_offsets, ctypes.c_int8),
+            _pointer(sample_offsets, ctypes.c_int32),
             MAX_SAMPLE_STRIDE,
             _pointer(collision_thresholds, ctypes.c_uint8),
             len(patterns),

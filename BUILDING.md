@@ -2,7 +2,7 @@
 
 The tagged source contains the Python application, QML renderer, Rust native
 library, compatibility tables, packaging configuration, and tests used for the
-V1.1.0 Alpha release.
+V1.2.0 Alpha release.
 
 ## Requirements
 

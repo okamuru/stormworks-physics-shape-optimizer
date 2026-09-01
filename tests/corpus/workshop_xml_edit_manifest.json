@@ -1,0 +1,45 @@
+{
+  "schema": "spso-workshop-xml-edit-corpus-v1",
+  "observed_at": "2026-09-01",
+  "stormworks_build_id": "24749959",
+  "build_osx_sha256": "15ec31184c9c56a53d154b75edb352da86487774f498de3a2e5145d2a7d5203b",
+  "vehicle_xml_redistributed": false,
+  "entries": [
+    {
+      "workshop_id": "2133687729",
+      "author": "katstel",
+      "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=2133687729",
+      "scope": "all bodies",
+      "purpose": "axis-scaled wedge, pyramid, and inverse-pyramid coverage",
+      "native_merge_groups": 150,
+      "native_f2_shapes": 111
+    },
+    {
+      "workshop_id": "2652608368",
+      "author": "Shamux",
+      "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=2652608368",
+      "scope": "body 7",
+      "purpose": "two-voxel scaled wedge second-pass regression",
+      "native_merge_groups": 8,
+      "native_f2_shapes": 8
+    },
+    {
+      "workshop_id": "3107364082",
+      "author": "juandao",
+      "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3107364082",
+      "scope": "body 0",
+      "purpose": "mixed grid and scaled wedge second-pass regression",
+      "native_merge_groups": 138,
+      "native_f2_shapes": 136
+    },
+    {
+      "workshop_id": "2777582859",
+      "author": "HappyCorpse",
+      "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=2777582859",
+      "scope": "body 0",
+      "purpose": "three-voxel mixed-scale merge regression",
+      "native_merge_groups": 195,
+      "native_f2_shapes": 195
+    }
+  ]
+}

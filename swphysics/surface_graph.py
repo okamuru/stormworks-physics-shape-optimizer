@@ -246,6 +246,19 @@ class SurfaceMetadata:
             )
             for row in resolution["resolutions"]
         }
+        self._directional_resolutions: Dict[
+            Tuple[int, GridPoint], SurfaceResolution
+        ] = {}
+        for (_rotation, shape, direction), item in self.resolutions.items():
+            if shape not in (6, 7, 8):
+                continue
+            key = (shape, direction)
+            existing = self._directional_resolutions.setdefault(key, item)
+            if existing != item:
+                raise ValueError(
+                    "native directional surface resolution is ambiguous: "
+                    f"{key}"
+                )
         self.types: Dict[int, SurfaceType] = {}
         for row in table["types"]:
             edges = tuple(
@@ -288,6 +301,95 @@ class SurfaceMetadata:
                         f"{edge.edge_id}"
                     )
 
+    @staticmethod
+    def _cardinal_type(direction: GridPoint) -> Optional[int]:
+        """Mirror the native X, then Y, then Z direction priority."""
+
+        x, y, z = direction
+        if x == 1:
+            return 0
+        if x == -1:
+            return 1
+        if y == 1:
+            return 2
+        if y == -1:
+            return 3
+        if z == 1:
+            return 4
+        if z == -1:
+            return 5
+        return None
+
+    def _fallback_resolution(
+        self,
+        rotation: Matrix3,
+        shape: int,
+        direction: GridPoint,
+    ) -> SurfaceResolution:
+        """Reproduce ``get_surface_type`` for an arbitrary integer matrix.
+
+        The extracted resolution table covers the game's 48 signed grid
+        transforms.  XML editing can supply scaling, shear, or a singular
+        matrix, but the game still quantizes those inputs to its existing 58
+        surface types.  This is a direct transcription of build 24749959's
+        shape 1..8 switch, not an affine-polygon approximation.
+        """
+
+        empty = SurfaceResolution(type_count=0, primary=0, secondary=0)
+        if shape in (1, 4, 5):
+            primary = self._cardinal_type(direction)
+            return (
+                empty
+                if primary is None
+                else SurfaceResolution(
+                    type_count=1, primary=primary, secondary=0
+                )
+            )
+        if shape == 2:
+            base = self._cardinal_type(direction)
+            if base is None:
+                return empty
+
+            # Native get_surface_type multiplies these two local vectors by
+            # the supplied matrix, then compares integer dot products with a
+            # cardinal face reference.  Matrix3 is column-major.
+            axis_a = (rotation[0], rotation[1], rotation[2])
+            axis_b = (-rotation[6], -rotation[7], -rotation[8])
+            reference = (
+                (0, 0, -1),
+                (0, 0, -1),
+                (0, 0, -1),
+                (0, 0, -1),
+                (0, 1, 0),
+                (0, -1, 0),
+            )[base]
+
+            def dot(left: GridPoint, right: GridPoint) -> int:
+                # The native routine uses signed 32-bit imul/add.  Wrapping
+                # here also keeps extreme edited values deterministic.
+                value = sum(left[index] * right[index] for index in range(3))
+                return ((value + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+
+            facing = dot(axis_b, reference)
+            if facing == 1:
+                quarter = 1
+            elif facing == -1:
+                quarter = 3
+            elif dot(axis_a, reference) == 1:
+                quarter = 2
+            else:
+                quarter = 4
+            return SurfaceResolution(
+                type_count=2,
+                primary=base + 6 * quarter,
+                secondary=base + 6 * (quarter % 4) + 6,
+            )
+        if shape in (6, 7, 8):
+            return self._directional_resolutions.get(
+                (shape, direction), empty
+            )
+        return empty
+
     def lookup(
         self, component_rotation: Matrix3, surface: DefinitionSurface
     ) -> Optional[SurfaceResolution]:
@@ -308,7 +410,14 @@ class SurfaceMetadata:
         direction = rounded_surface_direction(
             _rotate_float_vector(component_rotation, local_normal)
         )
-        return self.resolutions.get((world_rotation, surface.shape, direction))
+        exact = self.resolutions.get(
+            (world_rotation, surface.shape, direction)
+        )
+        if exact is not None:
+            return exact
+        return self._fallback_resolution(
+            world_rotation, surface.shape, direction
+        )
 
     def resolve(
         self, component_rotation: Matrix3, surface: DefinitionSurface

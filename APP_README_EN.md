@@ -1,4 +1,4 @@
-# Stormworks Physics Shape Optimizer V1.1.0 Alpha
+# Stormworks Physics Shape Optimizer V1.2.0 Alpha
 
 Author: **IrisNuiYaMa_164**
 
@@ -72,6 +72,8 @@ When the analysis finishes, the app displays:
 - Component count
 - Predicted number of Shapes that can be removed
 
+Known Physics blocks transformed through XML scaling, reflection, shearing, or similar edits are included in the analysis, including Physics Flooder watertight Surface evaluation. If an unsupported Component is present, the app protects its order and optimizes the remaining Components only within safe boundaries.
+
 ### 5. Check the 3D Preview
 
 Switch between `現在` (Current) and `最適化後` (Optimized) to compare the Shapes. Use `表示範囲` (Display Range) to show all Bodies or one individual Body.
@@ -138,7 +140,7 @@ Only the Component order in the optimized copy is changed.
 ## Version Information
 
 - App: Stormworks Physics Shape Optimizer
-- Version: 1.1.0 Alpha
+- Version: 1.2.0 Alpha
 - Author: IrisNuiYaMa_164
 
 ## License and Source Code

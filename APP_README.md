@@ -1,4 +1,4 @@
-# Stormworks Physics Shape Optimizer V1.1.0 Alpha
+# Stormworks Physics Shape Optimizer V1.2.0 Alpha
 
 Author: **IrisNuiYaMa_164**
 
@@ -72,6 +72,8 @@ CPUワーカーは通常「自動（推奨）」で構いません。
 - Component数
 - 予測できるShape削減数
 
+XMLで拡大・縮小、反転、せん断などの変形を加えた既知のPhysicsブロックも、Physics Flooderの水密Surface判定を含めて解析対象になります。対応外のComponentが含まれる場合は、そのComponentの順序を保護し、残りを安全な範囲で最適化します。
+
 ### 5. 3Dプレビューを確認する
 
 「現在」と「最適化後」を切り替えて、Shapeの変化を確認できます。「表示範囲」から全Bodyまたは個別Bodyを選べます。
@@ -138,7 +140,7 @@ Stormworksのインストール先から `rom/data/definitions` を手動で選�
 ## バージョン情報
 
 - アプリ: Stormworks Physics Shape Optimizer
-- バージョン: 1.1.0 Alpha
+- バージョン: 1.2.0 Alpha
 - 作者: IrisNuiYaMa_164
 
 ## ライセンスとソースコード
